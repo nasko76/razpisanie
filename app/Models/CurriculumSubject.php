@@ -17,8 +17,16 @@ class CurriculumSubject extends Model
         'contact_hours',
         'self_study_hours',
         'scheduled_hours',
+        'cycle_weeks',
         'control_type',
     ];
+
+    protected function casts(): array
+    {
+        return [
+            'cycle_weeks' => 'array',
+        ];
+    }
 
     public function curriculumVersion(): BelongsTo
     {

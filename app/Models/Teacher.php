@@ -12,8 +12,22 @@ class Teacher extends Model
         'last_name',
         'title',
         'max_daily_hours',
+        'weekly_workload_hours',
         'active',
+        'unavailable_weekdays',
+        'preferred_weekdays',
+        'unavailable_periods',
     ];
+
+    protected function casts(): array
+    {
+        return [
+            'active' => 'boolean',
+            'unavailable_weekdays' => 'array',
+            'preferred_weekdays' => 'array',
+            'unavailable_periods' => 'array',
+        ];
+    }
 
     public function assignments(): HasMany
     {

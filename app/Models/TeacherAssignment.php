@@ -24,4 +24,9 @@ class TeacherAssignment extends Model
     {
         return $this->belongsTo(Subject::class);
     }
+
+    public function curriculumVersion(): BelongsTo
+    {
+        return $this->belongsTo(CurriculumVersion::class);
+    }
 }
