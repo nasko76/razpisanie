@@ -19,12 +19,14 @@ class CurriculumSubject extends Model
         'scheduled_hours',
         'cycle_weeks',
         'control_type',
+        'source_data',
     ];
 
     protected function casts(): array
     {
         return [
             'cycle_weeks' => 'array',
+            'source_data' => 'array',
         ];
     }
 

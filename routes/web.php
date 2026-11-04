@@ -4,6 +4,7 @@ use App\Http\Controllers\AdminController;
 use App\Http\Controllers\CatalogController;
 use App\Http\Controllers\ProfileController;
 use App\Http\Controllers\ScheduleController;
+use App\Http\Controllers\StudyDataImportController;
 use Illuminate\Support\Facades\Route;
 
 Route::get('/', function () {
@@ -15,6 +16,9 @@ Route::middleware(['auth', 'role:admin'])->group(function () {
     Route::get('/admin', [AdminController::class, 'index'])->name('admin.dashboard');
 
     Route::get('/admin/catalog', [CatalogController::class, 'index'])->name('catalog.index');
+    Route::get('/admin/imports', [StudyDataImportController::class, 'index'])->name('imports.index');
+    Route::post('/admin/imports/preview', [StudyDataImportController::class, 'preview'])->name('imports.preview');
+    Route::post('/admin/imports/confirm', [StudyDataImportController::class, 'confirm'])->name('imports.confirm');
     Route::post('/admin/catalog/specialties', [CatalogController::class, 'storeSpecialty'])->name('catalog.specialties.store');
     Route::patch('/admin/catalog/specialties/{specialty}', [CatalogController::class, 'updateSpecialty'])->name('catalog.specialties.update');
     Route::post('/admin/catalog/curriculum-versions', [CatalogController::class, 'storeCurriculumVersion'])->name('catalog.curriculum-versions.store');

@@ -13,7 +13,16 @@ class TeacherAssignment extends Model
         'curriculum_version_id',
         'course_year',
         'semester',
+        'coverage_type',
+        'source_data',
     ];
+
+    protected function casts(): array
+    {
+        return [
+            'source_data' => 'array',
+        ];
+    }
 
     public function teacher(): BelongsTo
     {

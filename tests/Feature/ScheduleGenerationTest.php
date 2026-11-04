@@ -120,6 +120,20 @@ it('generates only curriculum subjects for the selected semester and cycle weeks
         ->and(TimetableEntry::query()->pluck('cycle_week')->sort()->values()->all())->toBe([1, 3]);
 });
 
+it('does not assume cycle weeks for an imported curriculum row when the source has none', function () {
+    $fixtures = createScheduleFixtures();
+    $fixtures['curriculumSubject']->update([
+        'cycle_weeks' => null,
+        'source_data' => ['columns' => ['Семестър' => '1']],
+    ]);
+
+    $result = app(ScheduleService::class)->generateForGroup($fixtures['group'], '2026/2027', 'winter');
+
+    expect($result['entries'])->toBeEmpty()
+        ->and($result['unscheduled'])->toHaveCount(1)
+        ->and($result['unscheduled'][0]['reason'])->toContain('не са зададени седмици');
+});
+
 it('respects teacher and room availability while generating', function () {
     $fixtures = createScheduleFixtures([1]);
     $fixtures['teacher']->update([

@@ -65,6 +65,7 @@
                 <h1>Учебен каталог</h1>
                 <p class="lede">Управлявайте специалности, версии на планове, дисциплини, групи, преподаватели и зали.</p>
             </div>
+            <a class="button primary" href="{{ route('imports.index') }}">Импорт на учебни данни</a>
         </section>
 
         @if(session('status'))
@@ -216,9 +217,17 @@
                 </form>
                 <div class="list">
                     @forelse($curriculumSubjects as $item)
-                        <article class="item row-head">
-                            <div><strong>{{ $item->curriculumVersion->specialty->name }} · {{ $item->subject->name }}</strong><div class="muted">{{ $item->course_year }} курс · семестър {{ $item->semester_no }} · план {{ $item->curriculumVersion->name }}</div></div>
-                            <span class="muted">{{ $item->contact_hours }} контактни · {{ $item->self_study_hours }} самоподготовка · седмици {{ implode(', ', $item->cycle_weeks ?? [1,2,3]) }}</span>
+                        <article class="item">
+                            <div class="row-head">
+                                <div><strong>{{ $item->curriculumVersion->specialty->name }} · {{ $item->subject->name }}</strong><div class="muted">{{ $item->course_year }} курс · семестър {{ $item->semester_no }} · план {{ $item->curriculumVersion->name }}</div></div>
+                                <span class="muted">{{ $item->contact_hours }} контактни · {{ $item->self_study_hours }} самоподготовка · седмици {{ $item->cycle_weeks !== null ? implode(', ', $item->cycle_weeks) : 'не са зададени' }}</span>
+                            </div>
+                            @if(!empty($item->source_data['columns']))
+                                <details><summary>Импортирани данни и забележки</summary>
+                                    <div class="muted">@foreach($item->source_data['columns'] as $label => $value){{ $label }}: {{ $value !== '' ? $value : '—' }}@if(!$loop->last) · @endif @endforeach</div>
+                                    @if(!empty($item->source_data['warnings']))<ul class="muted">@foreach($item->source_data['warnings'] as $warning)<li>{{ $warning }}</li>@endforeach</ul>@endif
+                                </details>
+                            @endif
                         </article>
                     @empty
                         <div class="empty">Няма дисциплини в учебните планове.</div>
@@ -321,9 +330,17 @@
                 </form>
                 <div class="list">
                     @forelse($assignments as $assignment)
-                        <article class="item row-head">
-                            <div><strong>{{ $assignment->subject->name }} · {{ $assignment->teacher->title }} {{ $assignment->teacher->first_name }} {{ $assignment->teacher->last_name }}</strong><div class="muted">{{ $assignment->curriculumVersion->specialty->name }} · {{ $assignment->course_year }} курс · {{ $assignment->semester ?: 'всеки семестър' }}</div></div>
-                            <span class="pill">{{ $assignment->curriculumVersion->name }}</span>
+                        <article class="item">
+                            <div class="row-head">
+                                <div><strong>{{ $assignment->subject->name }} · {{ $assignment->teacher->title }} {{ $assignment->teacher->first_name }} {{ $assignment->teacher->last_name }}</strong><div class="muted">{{ $assignment->curriculumVersion->specialty->name }} · {{ $assignment->course_year }} курс · {{ $assignment->semester ?: 'всеки семестър' }} · {{ $assignment->coverage_type ?: 'видът не е указан' }}</div></div>
+                                <span class="pill">{{ $assignment->curriculumVersion->name }}</span>
+                            </div>
+                            @if(!empty($assignment->source_data['columns']))
+                                <details><summary>Импортирани данни и забележки</summary>
+                                    <div class="muted">@foreach($assignment->source_data['columns'] as $label => $value){{ $label }}: {{ $value !== '' ? $value : '—' }}@if(!$loop->last) · @endif @endforeach</div>
+                                    @if(!empty($assignment->source_data['warnings']))<ul class="muted">@foreach($assignment->source_data['warnings'] as $warning)<li>{{ $warning }}</li>@endforeach</ul>@endif
+                                </details>
+                            @endif
                         </article>
                     @empty
                         <div class="empty">Няма въведена преподавателска обезпеченост.</div>

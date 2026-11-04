@@ -78,6 +78,15 @@ class ScheduleService
                 $subject = $curriculumSubject->subject;
                 $teacher = $this->findTeacherForSubject($subject, $group, $semesterType);
                 $scheduledHours = (int) ($curriculumSubject->scheduled_hours ?: $subject->default_hours);
+                if ($curriculumSubject->cycle_weeks === null && $curriculumSubject->source_data !== null) {
+                    $unscheduled[] = [
+                        'subject' => $subject->name,
+                        'reason' => 'За импортираната дисциплина не са зададени седмици от цикъла.',
+                    ];
+
+                    continue;
+                }
+
                 $weeks = $curriculumSubject->cycle_weeks ?: [1, 2, 3];
                 $weeks = array_values(array_unique(array_filter(
                     $weeks,
