@@ -4,14 +4,17 @@
     <meta charset="UTF-8">
     <title>Разписание PDF</title>
     <style>
-        body { font-family: Arial, sans-serif; padding: 20px; font-size: 12px; }
+        body { font-family: DejaVu Sans, sans-serif; padding: 20px; font-size: 11px; color: #17231d; }
         table { width: 100%; border-collapse: collapse; margin-top: 20px; }
-        th, td { border: 1px solid #333; padding: 8px; text-align: left; }
-        th { background: #f3f4f6; }
+        th, td { border: 1px solid #d3ddd6; padding: 8px; text-align: left; }
+        th { background: #eaf3ed; }
+        h1 { margin: 0 0 5px; font-size: 19px; }
+        p { margin: 0; color: #66756c; }
     </style>
 </head>
 <body>
-    <h2>{{ $group->specialty->name }} - {{ $group->group_name }}</h2>
+    <h1>{{ $group->specialty->name }} · {{ $group->course_year }} курс · {{ $group->group_name }}</h1>
+    <p>{{ $academicYear }} · {{ $semesterType === 'winter' ? 'Зимен семестър' : 'Летен семестър' }} · Учебен план: {{ $group->curriculumVersion?->name ?? '—' }}</p>
 
     <table>
         <thead>
@@ -27,7 +30,7 @@
         <tbody>
             @foreach($entries as $entry)
                 <tr>
-                    <td>{{ $entry->weekday_no }}</td>
+                    <td>{{ $weekdays[$entry->weekday_no] ?? $entry->weekday_no }}</td>
                     <td>{{ $entry->cycle_week }}</td>
                     <td>{{ $entry->subject->name }}</td>
                     <td>
@@ -40,7 +43,7 @@
                             {{ $entry->room->name }}
                         @endif
                     </td>
-                    <td>{{ $entry->start_time }} - {{ $entry->end_time }}</td>
+                    <td>{{ substr($entry->start_time, 0, 5) }}–{{ substr($entry->end_time, 0, 5) }}</td>
                 </tr>
             @endforeach
         </tbody>

@@ -11,5 +11,16 @@ class Room extends Model
         'room_type',
         'capacity',
         'is_active',
+        'equipment',
+        'unavailable_periods',
     ];
+
+    protected function casts(): array
+    {
+        return [
+            'is_active' => 'boolean',
+            'equipment' => 'array',
+            'unavailable_periods' => 'array',
+        ];
+    }
 }

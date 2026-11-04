@@ -2,12 +2,12 @@
 
 namespace App\Http\Controllers;
 
-use Illuminate\Http\Request;
+use Illuminate\Http\RedirectResponse;
 
 class AdminController extends Controller
 {
-    public function index()
+    public function index(): RedirectResponse
     {
-        return view('dashboard');
+        return redirect()->route('schedules.index');
     }
 }
