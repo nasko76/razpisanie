@@ -14,6 +14,7 @@ class TeacherAssignment extends Model
         'course_year',
         'semester',
         'coverage_type',
+        'student_flow_id',
         'source_data',
     ];
 
@@ -37,5 +38,10 @@ class TeacherAssignment extends Model
     public function curriculumVersion(): BelongsTo
     {
         return $this->belongsTo(CurriculumVersion::class);
+    }
+
+    public function studentFlow(): BelongsTo
+    {
+        return $this->belongsTo(StudentFlow::class);
     }
 }

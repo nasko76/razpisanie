@@ -70,12 +70,16 @@
                                 @if($isCurriculum)
                                     {{ $row['subject_code'] ?: 'Без код' }} · {{ $row['course_year'] ? $row['course_year'].' курс' : 'Курс неразпознат' }} · {{ $row['semester_no'] ? 'семестър '.$row['semester_no'] : 'Семестър неразпознат' }}
                                 @else
-                                    {{ $row['course_year'] ? $row['course_year'].' курс' : 'Курс неразпознат' }} · {{ $row['semester_no'] ? 'семестър '.$row['semester_no'] : 'Семестър неразпознат' }} · {{ $row['coverage_type'] ?: 'Вид обезпеченост не е указан' }}{{ $row['department'] ? ' · '.$row['department'] : '' }}
+                                    {{ $row['course_year'] ? $row['course_year'].' курс' : 'Курс неразпознат' }} · {{ $row['semester_no'] ? 'семестър '.$row['semester_no'] : 'Семестър неразпознат' }} · {{ $row['coverage_label'] ?: 'Вид обезпеченост не е указан' }}{{ $row['department'] ? ' · '.$row['department'] : '' }}
                                 @endif
                             </p>
                         </div>
                         <span class="pill {{ $statusClass }}">{{ $statusLabel }}</span>
                     </div>
+
+                    @if($isCurriculum)
+                        <p>АЗ: {{ $row['auditorium_hours'] ?? '—' }} · Л: {{ $row['lecture_hours'] ?? '—' }} · У: {{ $row['exercise_hours'] ?? '—' }} · Самоподготовка: {{ $row['self_study_hours'] ?? 0 }} · Контрол: {{ $row['normalized_control_type'] ?? '—' }}</p>
+                    @endif
 
                     @if($row['warnings'])
                         <ul class="warnings">@foreach($row['warnings'] as $warning)<li>{{ $warning }}</li>@endforeach</ul>

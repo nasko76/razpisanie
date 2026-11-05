@@ -37,11 +37,10 @@
         .meta strong { display: block; margin: 4px 0; color: var(--ink); font-size: 13px; }
         .schedule { overflow: hidden; }
         .schedule-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 18px 20px; border-bottom: 1px solid var(--line); }
-        .cycle { display: flex; gap: 6px; }
-        .cycle a { display: grid; min-width: 34px; height: 34px; place-items: center; border: 1px solid var(--line); border-radius: 9px; color: var(--muted); font-weight: 700; }
-        .cycle a.active { border-color: var(--green); background: var(--green-soft); color: var(--green); }
         .week-caption { color: var(--muted); font-size: 12px; }
         .grid-wrap { overflow-x: auto; padding: 12px; }
+        .week-schedule + .week-schedule { margin-top: 16px; }
+        .week-title { margin: 4px 10px 0; color: var(--green); font-size: 14px; font-weight: 800; }
         table { width: 100%; min-width: 790px; border-collapse: separate; border-spacing: 6px; table-layout: fixed; }
         th { padding: 7px 9px; color: var(--muted); font-size: 11px; font-weight: 750; text-align: left; text-transform: uppercase; letter-spacing: .07em; }
         th:first-child { width: 154px; }
@@ -76,7 +75,7 @@
         .mobile-note { display: none; padding: 0 20px 14px; color: var(--muted); font-size: 11px; }
         @media (max-width: 920px) { .layout { grid-template-columns: 1fr; } .filters { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 12px; } .filters .panel-title, .filters .button, .meta { grid-column: 1 / -1; } .heading { align-items: start; flex-direction: column; } }
         @media (max-width: 560px) { .shell { padding: 18px 12px 35px; } .topbar { margin-bottom: 22px; } .toplinks { gap: 8px; } .brand span:last-child { display: none; } .filters { grid-template-columns: 1fr; } .filters .panel-title, .filters .button, .meta { grid-column: auto; } .schedule-head { align-items: start; flex-direction: column; } .mobile-note { display: block; } }
-        @media print { body { background: white; } .shell { max-width: none; padding: 0; } .topbar, .heading, .filters, .schedule-head .cycle, .lesson-tools, .mobile-note { display: none !important; } .layout { display: block; } .panel { border: 0; box-shadow: none; } .schedule-head { padding: 0 0 10px; } .grid-wrap { overflow: visible; padding: 0; } table { min-width: 0; border-spacing: 3px; } .dropzone, .block-label { min-height: 76px; } }
+        @media print { body { background: white; } .shell { max-width: none; padding: 0; } .topbar, .heading, .filters, .lesson-tools, .mobile-note { display: none !important; } .layout { display: block; } .panel { border: 0; box-shadow: none; } .schedule-head { padding: 0 0 10px; } .grid-wrap { overflow: visible; padding: 0; } table { min-width: 0; border-spacing: 3px; } .dropzone, .block-label { min-height: 76px; } }
     </style>
 </head>
 <body>
@@ -119,14 +118,16 @@
         @if($errors->has('schedule'))
             <div class="notice warning">{{ $errors->first('schedule') }}</div>
         @endif
-        @if(count($unscheduled))
-            <div class="notice warning">
-                Част от занятията не са разпределени:
+        @if($scheduleTested)
+            <div class="notice {{ count($scheduleTestWarnings) ? 'warning' : '' }}">
+                <strong>{{ count($scheduleTestWarnings) ? 'Забележки и препоръки от проверката' : 'Проверката е успешна' }}</strong>
+                @if(count($scheduleTestWarnings))
                 <ul>
-                    @foreach($unscheduled as $lesson)
-                        <li><strong>{{ $lesson['subject'] }}</strong> — {{ $lesson['reason'] }}</li>
+                    @foreach($scheduleTestWarnings as $warning)
+                        <li><strong>{{ $warning['subject'] }}</strong> — {{ $warning['reason'] }} {{ $warning['suggestion'] }}</li>
                     @endforeach
                 </ul>
+                @endif
             </div>
         @endif
 
@@ -160,6 +161,16 @@
                         <strong>{{ $selectedGroup->curriculumVersion?->name ?? 'Няма зададен план' }}</strong>
                         {{ $selectedGroup->student_count }} студенти
                     </div>
+                    <details class="meta">
+                        <summary>Часове по учебен план · {{ $semesterType === 'winter' ? 'зимен' : 'летен' }} семестър</summary>
+                        <ul>
+                            @forelse($curriculumSubjects as $curriculumSubject)
+                                <li>{{ $curriculumSubject->subject->name }} · АЗ {{ $curriculumSubject->subject->auditorium_hours }} · Л {{ $curriculumSubject->subject->lecture_hours }} · У {{ $curriculumSubject->subject->exercise_hours }} · самоподготовка {{ $curriculumSubject->subject->self_study_hours }}</li>
+                            @empty
+                                <li>Няма дисциплини за избрания курс и семестър.</li>
+                            @endforelse
+                        </ul>
+                    </details>
                 @endif
             </aside>
 
@@ -169,53 +180,58 @@
                         <h2 class="panel-title" style="margin:0 0 3px">
                             {{ $selectedGroup ? $selectedGroup->specialty->name.' · '.$selectedGroup->group_name : 'Изберете група' }}
                         </h2>
-                        <div class="week-caption">{{ $academicYear }} · {{ $semesterType === 'winter' ? 'Зимен семестър' : 'Летен семестър' }} · Седмица {{ $cycleWeek }}</div>
+                        <div class="week-caption">{{ $academicYear }} · {{ $semesterType === 'winter' ? 'Зимен семестър' : 'Летен семестър' }} · Седмици 1, 2 и 3</div>
                     </div>
-                    <nav class="cycle" aria-label="Седмица от цикъла">
-                        @foreach([1, 2, 3] as $week)
-                            <a class="{{ $cycleWeek === $week ? 'active' : '' }}"
-                               href="{{ route('schedules.index', ['group_id' => $selectedGroup?->id, 'academic_year' => $academicYear, 'semester_type' => $semesterType, 'cycle_week' => $week]) }}"
-                               aria-label="Седмица {{ $week }}">{{ $week }}</a>
-                        @endforeach
-                    </nav>
                 </div>
 
                 @if($selectedGroup)
-                    <div class="mobile-note">За ръчно преместване плъзнете занятие в друг блок. Натиснете „Редакция“ за преподавател, зала, седмица или заключване.</div>
+                    <div class="mobile-note">Трите седмици са показани едновременно. Плъзнете занятие в друг ден, част от деня или седмица. Натиснете „Редакция“ за преподавател, зала или заключване.</div>
+                    @foreach([1, 2, 3] as $week)
+                    <section class="week-schedule" aria-label="Разписание за седмица {{ $week }}">
+                    <h3 class="week-title">Седмица {{ $week }}</h3>
                     <div class="grid-wrap">
                         <table>
                             <thead>
                                 <tr>
-                                    <th>Времеви блок</th>
+                                    <th>Част от деня</th>
                                     @foreach($weekdays as $day)
                                         <th>{{ $day }}</th>
                                     @endforeach
                                 </tr>
                             </thead>
                             <tbody>
-                                @foreach($blocks as $blockIndex => $block)
+                                @foreach($dayParts as $part)
                                     <tr>
                                         <td>
                                             <div class="block-label">
-                                                <strong>{{ substr($block['start'], 0, 5) }}–{{ substr($block['end'], 0, 5) }}</strong>
-                                                {{ $block['hours'] }} учебни часа
+                                                <strong>{{ $part['label'] }}</strong>
                                             </div>
                                         </td>
                                         @foreach($weekdays as $dayNo => $day)
                                             @php
-                                                $cellEntries = $entries->filter(fn ($entry) => $entry->weekday_no === $dayNo && $entry->start_time === $block['start'] && $entry->end_time === $block['end']);
+                                                $cellEntries = $entries->filter(function ($entry) use ($dayNo, $part, $week) {
+                                                    $start = substr($entry->start_time, 0, 5);
+                                                    $after = $part['after'] ?? null;
+                                                    return $entry->cycle_week === $week
+                                                        && $entry->weekday_no === $dayNo
+                                                        && ($after === null || $start >= $after)
+                                                        && ($part['before'] === null || $start < $part['before']);
+                                                });
                                             @endphp
-                                            <td class="dropzone" data-drop-week="{{ $cycleWeek }}" data-drop-day="{{ $dayNo }}" data-drop-block="{{ $blockIndex }}">
+                                            <td class="dropzone" data-drop-week="{{ $week }}" data-drop-day="{{ $dayNo }}" data-drop-part="{{ $part['key'] }}">
                                                 @forelse($cellEntries as $entry)
                                                     @php
-                                                        $entryBlock = collect($blocks)->search(fn ($candidate) => $candidate['start'] === $entry->start_time && $candidate['end'] === $entry->end_time);
-                                                        $teacherName = $entry->teacher ? trim(($entry->teacher->title ? $entry->teacher->title.' ' : '').$entry->teacher->first_name.' '.$entry->teacher->last_name) : 'Преподавател не е зададен';
+                                                        $subjectTeacherNames = $teacherNamesBySubject[$entry->subject_id] ?? [];
+                                                        if ($subjectTeacherNames === [] && $entry->teacher) {
+                                                            $subjectTeacherNames[] = trim(($entry->teacher->title ? $entry->teacher->title.' ' : '').$entry->teacher->first_name.' '.$entry->teacher->last_name);
+                                                        }
                                                     @endphp
                                                     <article class="lesson"
                                                              draggable="{{ $entry->locked ? 'false' : 'true' }}"
                                                              data-entry-id="{{ $entry->id }}">
-                                                        <span class="lesson-title">{{ $entry->subject->name }}</span>
-                                                        <span class="lesson-meta">{{ substr($entry->start_time, 0, 5) }}–{{ substr($entry->end_time, 0, 5) }} · {{ $entry->room?->name ?? 'Без зала' }}<br>{{ $teacherName }}</span>
+                                                        <span class="lesson-title">{{ $entry->subject?->name ?? $entry->custom_subject_name }}</span>
+                                                        <span class="lesson-meta">{{ substr($entry->start_time, 0, 5) }}–{{ substr($entry->end_time, 0, 5) }} · {{ $entry->duration_hours }} уч. ч. · {{ $entry->room?->name ?? 'Без зала' }}<br>{{ $subjectTeacherNames === [] ? 'Преподавател не е зададен' : implode(', ', $subjectTeacherNames) }}@if($entry->studentFlow)<br>Общ поток: {{ $entry->studentFlow->name }}@endif</span>
+                                                        @if($entry->note)<span class="lesson-meta">{{ $entry->note }}</span>@endif
                                                         <div class="lesson-tools">
                                                             @if($entry->locked)
                                                                 <span class="locked">Заключено</span>
@@ -230,7 +246,6 @@
                                                                     <input type="hidden" name="group_id" value="{{ $selectedGroup->id }}">
                                                                     <input type="hidden" name="academic_year" value="{{ $academicYear }}">
                                                                     <input type="hidden" name="semester_type" value="{{ $semesterType }}">
-                                                                    <input type="hidden" name="cycle_week" value="{{ $cycleWeek }}">
                                                                     <label>Седмица
                                                                         <select name="cycle_week">
                                                                             @foreach([1, 2, 3] as $week)
@@ -245,10 +260,23 @@
                                                                             @endforeach
                                                                         </select>
                                                                     </label>
-                                                                    <label>Блок
-                                                                        <select name="block">
-                                                                            @foreach($blocks as $value => $candidate)
-                                                                                <option value="{{ $value }}" @selected($entryBlock === $value)>{{ substr($candidate['start'], 0, 5) }}–{{ substr($candidate['end'], 0, 5) }}</option>
+                                                                    <label>Начален час<input type="time" name="start_time" value="{{ substr($entry->start_time, 0, 5) }}" required></label>
+                                                                    <label>Краен час<input type="time" name="end_time" value="{{ substr($entry->end_time, 0, 5) }}" required></label>
+                                                                    <label>Учебни часове<input type="number" name="duration_hours" min="1" max="16" value="{{ $entry->duration_hours }}" required></label>
+                                                                    <label>Свободно име<input name="custom_subject_name" value="{{ $entry->custom_subject_name }}" maxlength="255"></label>
+                                                                    <label>Бележка<textarea name="note" rows="2" maxlength="2000">{{ $entry->note }}</textarea></label>
+                                                                    <label>Вид занятие
+                                                                        <select name="coverage_type">
+                                                                            <option value="">Не е уточнен</option>
+                                                                            <option value="lecture" @selected($entry->coverage_type === 'lecture')>Лекции</option>
+                                                                            <option value="exercise" @selected($entry->coverage_type === 'exercise')>Упражнения</option>
+                                                                        </select>
+                                                                    </label>
+                                                                    <label>Поток
+                                                                        <select name="student_flow_id">
+                                                                            <option value="">Без общ поток</option>
+                                                                            @foreach($studentFlows as $flow)
+                                                                                <option value="{{ $flow->id }}" @selected($entry->student_flow_id === $flow->id)>{{ $flow->name }}</option>
                                                                             @endforeach
                                                                         </select>
                                                                     </label>
@@ -261,7 +289,8 @@
                                                                         </select>
                                                                     </label>
                                                                     <label>Зала
-                                                                        <select name="room_id" required>
+                                                                        <select name="room_id">
+                                                                            <option value="">Без зала</option>
                                                                             @foreach($rooms as $room)
                                                                                 <option value="{{ $room->id }}" @selected($entry->room_id === $room->id)>{{ $room->name }} · {{ $room->capacity }} места</option>
                                                                             @endforeach
@@ -297,15 +326,66 @@
                             </tbody>
                         </table>
                     </div>
+                    </section>
+                    @endforeach
 
-                    <form method="POST" action="{{ route('schedules.generate') }}" style="padding:0 20px 20px">
-                        @csrf
-                        <input type="hidden" name="group_id" value="{{ $selectedGroup->id }}">
-                        <input type="hidden" name="academic_year" value="{{ $academicYear }}">
-                        <input type="hidden" name="semester_type" value="{{ $semesterType }}">
-                        <button class="button primary" type="submit">Генерирай отново</button>
-                        <span class="week-caption">Заключените занятия ще бъдат запазени.</span>
-                    </form>
+                    <div class="actions" style="padding:0 20px 20px">
+                        @if($selectedGroup->curriculum_version_id)
+                        <form method="POST" action="{{ route('schedules.generate') }}">
+                            @csrf
+                            <input type="hidden" name="group_id" value="{{ $selectedGroup->id }}">
+                            <input type="hidden" name="academic_year" value="{{ $academicYear }}">
+                            <input type="hidden" name="semester_type" value="{{ $semesterType }}">
+                            <button class="button primary" type="submit">Генерирай отново</button>
+                        </form>
+                        @endif
+                        <form method="POST" action="{{ route('schedules.test') }}">
+                            @csrf
+                            <input type="hidden" name="group_id" value="{{ $selectedGroup->id }}">
+                            <input type="hidden" name="academic_year" value="{{ $academicYear }}">
+                            <input type="hidden" name="semester_type" value="{{ $semesterType }}">
+                            <button class="button" type="submit">Тествай разписанието</button>
+                        </form>
+                        <span class="week-caption">Забележките и препоръките се показват след теста. Заключените занятия се запазват при генериране.</span>
+                    </div>
+                    @unless($selectedGroup->curriculum_version_id)
+                        <p class="week-caption" style="padding:0 20px 20px">Групата няма учебен план. Добавяйте занятията ръчно.</p>
+                    @endunless
+
+                    <div style="padding:0 20px 20px">
+                        <form method="POST" action="{{ route('schedules.note.update') }}" class="edit-form">
+                            @csrf
+                            @method('PUT')
+                            <input type="hidden" name="group_id" value="{{ $selectedGroup->id }}">
+                            <input type="hidden" name="academic_year" value="{{ $academicYear }}">
+                            <input type="hidden" name="semester_type" value="{{ $semesterType }}">
+                            <input type="hidden" name="cycle_week" value="{{ $cycleWeek }}">
+                            <label>Бележка към целия график<textarea name="note" rows="2" maxlength="5000">{{ $note }}</textarea></label>
+                            <button class="button" type="submit">Запази бележката</button>
+                        </form>
+
+                        <details style="margin-top:16px">
+                            <summary>Добави свободно занятие или корекция</summary>
+                            <form method="POST" action="{{ route('schedules.entries.store') }}" class="edit-form" style="margin-top:10px">
+                                @csrf
+                                <input type="hidden" name="group_id" value="{{ $selectedGroup->id }}">
+                                <input type="hidden" name="academic_year" value="{{ $academicYear }}">
+                                <input type="hidden" name="semester_type" value="{{ $semesterType }}">
+                                <label>Седмица<select name="cycle_week">@foreach([1, 2, 3] as $week)<option value="{{ $week }}" @selected($cycleWeek === $week)>Седмица {{ $week }}</option>@endforeach</select></label>
+                                <label>Наименование<input name="custom_subject_name" maxlength="255" required></label>
+                                <label>Ден<select name="weekday_no">@foreach($weekdays as $dayNo => $dayLabel)<option value="{{ $dayNo }}">{{ $dayLabel }}</option>@endforeach</select></label>
+                                <label>Начален час<input type="time" name="start_time" value="08:00" required></label>
+                                <label>Краен час<input type="time" name="end_time" value="11:45" required></label>
+                                <label>Учебни часове<input type="number" name="duration_hours" min="1" max="16" value="4" required></label>
+                                <label>Поток<select name="student_flow_id"><option value="">Без общ поток</option>@foreach($studentFlows as $flow)<option value="{{ $flow->id }}">{{ $flow->name }}</option>@endforeach</select></label>
+                                <label>Вид занятие<select name="coverage_type"><option value="">Не е уточнен</option><option value="lecture">Лекции</option><option value="exercise">Упражнения</option></select></label>
+                                <label>Преподавател<select name="teacher_id"><option value="">Без преподавател</option>@foreach($teachers as $teacher)<option value="{{ $teacher->id }}">{{ $teacher->title }} {{ $teacher->first_name }} {{ $teacher->last_name }}</option>@endforeach</select></label>
+                                <label>Зала<select name="room_id"><option value="">Без зала</option>@foreach($rooms as $room)<option value="{{ $room->id }}">{{ $room->name }}</option>@endforeach</select></label>
+                                <label class="span">Корекция / бележка<textarea name="note" rows="2" maxlength="2000"></textarea></label>
+                                <button class="button primary" type="submit">Добави в графика</button>
+                            </form>
+                        </details>
+                    </div>
                 @else
                     <div class="empty-state">
                         <div class="symbol">▦</div>
@@ -342,10 +422,24 @@
                 if (!draggedEntry) return;
 
                 const form = draggedEntry.querySelector('.edit-form');
+                const targetStartMinutes = { morning: 8 * 60, afternoon: 13 * 60, evening: 16 * 60 }[zone.dataset.dropPart];
+                const [currentStartHour, currentStartMinute] = form.elements.start_time.value.split(':').map(Number);
+                const [currentEndHour, currentEndMinute] = form.elements.end_time.value.split(':').map(Number);
+                const elapsedMinutes = (currentEndHour * 60 + currentEndMinute) - (currentStartHour * 60 + currentStartMinute);
+                const targetEndMinutes = targetStartMinutes + elapsedMinutes;
+                if (targetEndMinutes >= 24 * 60) {
+                    message.textContent = 'Избраният часови диапазон не се побира в деня.';
+                    return;
+                }
+                const formatTime = (minutes) => `${String(Math.floor(minutes / 60)).padStart(2, '0')}:${String(minutes % 60).padStart(2, '0')}`;
                 const data = new URLSearchParams({
                     cycle_week: zone.dataset.dropWeek,
                     weekday_no: zone.dataset.dropDay,
-                    block: zone.dataset.dropBlock,
+                    start_time: formatTime(targetStartMinutes),
+                    end_time: formatTime(targetEndMinutes),
+                    duration_hours: form.elements.duration_hours.value,
+                    coverage_type: form.elements.coverage_type.value,
+                    student_flow_id: form.elements.student_flow_id.value,
                     teacher_id: form.elements.teacher_id.value,
                     room_id: form.elements.room_id.value,
                     locked: form.elements.locked.checked ? '1' : '0',

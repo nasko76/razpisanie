@@ -49,6 +49,9 @@
         .edit-form .button { align-self:end; }
         .empty { padding:12px 0; color:var(--muted); font-size:12px; }
         .subheading { padding:14px 18px 4px; font-size:12px; font-weight:750; }
+        .tabnav { display:flex; flex-wrap:wrap; gap:8px; margin:0 0 16px; }
+        .tabnav a { display:inline-flex; min-height:40px; align-items:center; padding:0 14px; border:1px solid var(--line); border-radius:10px; background:#fff; font-weight:700; }
+        .tabnav a.active { border-color:var(--green); background:var(--soft); color:var(--green); }
         @media(max-width:850px) { .sections { grid-template-columns:1fr; } .card.wide { grid-column:auto; } .heading { align-items:start; flex-direction:column; } }
         @media(max-width:520px) { .forms,.edit-form { grid-template-columns:1fr; } .span { grid-column:auto; } .topbar { align-items:flex-start; } }
     </style>
@@ -57,7 +60,7 @@
     <main class="shell">
         <header class="topbar">
             <a class="brand" href="{{ route('schedules.index') }}"><span class="mark">Ф</span><span>ФИИ · Учебно разписание</span></a>
-            <nav><a href="{{ route('schedules.index') }}">Към разписанието</a></nav>
+            <nav style="display:flex;gap:14px"><a href="{{ route('schedules.index') }}">Към разписанието</a><a href="{{ route('settings.index') }}">Общи настройки</a></nav>
         </header>
         <section class="heading">
             <div>
@@ -78,7 +81,14 @@
             </div>
         @endif
 
+        <nav class="tabnav" aria-label="Секции на учебния каталог">
+            @foreach(['plans' => 'Учебни планове', 'subjects' => 'Дисциплини', 'teachers' => 'Преподаватели', 'organization' => 'Групи и потоци'] as $tab => $label)
+                <a href="{{ route('catalog.index', ['tab' => $tab]) }}" @if($activeTab === $tab) class="active" aria-current="page" @endif>{{ $label }}</a>
+            @endforeach
+        </nav>
+
         <div class="sections">
+            @if($activeTab === 'plans')
             <section class="card">
                 <div class="section-head"><div><h2>Специалности</h2><p>Учебни направления и образователни степени</p></div><span class="pill">{{ $specialties->count() }}</span></div>
                 <form class="forms" method="POST" action="{{ route('catalog.specialties.store') }}">
@@ -108,7 +118,9 @@
                     @endforelse
                 </div>
             </section>
+            @endif
 
+            @if($activeTab === 'plans')
             <section class="card">
                 <div class="section-head"><div><h2>Версии на учебни планове</h2><p>Новият план се добавя като отделна версия</p></div><span class="pill">{{ $curriculumVersions->count() }}</span></div>
                 <form class="forms" method="POST" action="{{ route('catalog.curriculum-versions.store') }}">
@@ -126,6 +138,11 @@
                         <article class="item">
                             <div class="row-head"><strong>{{ $version->specialty->name }} · {{ $version->name }}</strong><span class="pill {{ $version->is_active ? '' : 'off' }}">{{ $version->is_active ? 'Активен' : 'Архив' }}</span></div>
                             <div class="muted">Версия {{ $version->version_year }} · {{ $version->subjects_count }} дисциплини</div>
+                            <form method="POST" action="{{ route('catalog.curriculum-versions.duplicate', $version) }}" style="display:inline-block;margin-top:8px">
+                                @csrf
+                                <button class="button" type="submit">Копирай план</button>
+                            </form>
+                            <a class="button" href="{{ route('catalog.curriculum-versions.show', $version) }}">Общ план</a>
                             <form method="POST" action="{{ route('catalog.curriculum-versions.update', $version) }}" style="margin-top:7px">
                                 @csrf @method('PATCH')
                                 <button class="button" name="is_active" value="{{ $version->is_active ? '0' : '1' }}">{{ $version->is_active ? 'Архивирай' : 'Активирай' }}</button>
@@ -136,13 +153,15 @@
                     @endforelse
                 </div>
             </section>
+            @endif
 
+            @if($activeTab === 'organization')
             <section class="card">
                 <div class="section-head"><div><h2>Групи и випуски</h2><p>Всяка група е свързана с конкретна версия на плана</p></div><span class="pill">{{ $groups->count() }}</span></div>
                 <form class="forms" method="POST" action="{{ route('catalog.groups.store') }}">
                     @csrf
                     <label class="span">Специалност<select name="specialty_id" required>@foreach($specialties as $specialty)<option value="{{ $specialty->id }}">{{ $specialty->name }}</option>@endforeach</select></label>
-                    <label class="span">Версия на учебния план<select name="curriculum_version_id" required>@foreach($curriculumVersions as $version)<option value="{{ $version->id }}">{{ $version->specialty->name }} · {{ $version->name }}</option>@endforeach</select></label>
+                    <label class="span">Версия на учебния план<select name="curriculum_version_id"><option value="">Без учебен план (напр. магистри)</option>@foreach($curriculumVersions as $version)<option value="{{ $version->id }}">{{ $version->specialty->name }} · {{ $version->name }}</option>@endforeach</select></label>
                     <label>Курс<input name="course_year" type="number" min="1" max="6" value="1" required></label>
                     <label>Име на групата<input name="group_name" placeholder="А" required></label>
                     <label class="span">Брой студенти<input name="student_count" type="number" min="1" value="20" required></label>
@@ -167,29 +186,80 @@
                     @endforelse
                 </div>
             </section>
+            @endif
 
+            @if($activeTab === 'organization')
             <section class="card">
-                <div class="section-head"><div><h2>Дисциплини</h2><p>Самоподготовката се отчита отделно от контактните занятия</p></div><span class="pill">{{ $subjects->count() }}</span></div>
+                <div class="section-head"><div><h2>Учебни потоци</h2><p>Обединете групи за общи лекции; упражненията остават по групи.</p></div><span class="pill">{{ $studentFlows->count() }}</span></div>
+                <form class="forms" method="POST" action="{{ route('catalog.student-flows.store') }}">
+                    @csrf
+                    <label class="span">Име на потока<input name="name" required maxlength="255" placeholder="Поток 1 · Лекции"></label>
+                    <label class="span">Групи в потока
+                        <select name="student_group_ids[]" multiple size="5" required>
+                            @foreach($groups as $group)
+                                <option value="{{ $group->id }}">{{ $group->specialty->name }} · {{ $group->course_year }} курс · {{ $group->group_name }}</option>
+                            @endforeach
+                        </select>
+                        <span class="help">Изберете поне две групи, които посещават общите лекции.</span>
+                    </label>
+                    <button class="button primary span" type="submit">Създай поток</button>
+                </form>
+                <div class="list">
+                    @forelse($studentFlows as $flow)
+                        <article class="item">
+                            <strong>{{ $flow->name }}</strong>
+                            <div class="muted">{{ $flow->groups->map(fn ($group) => $group->specialty->name.' · '.$group->course_year.' курс · '.$group->group_name)->join(', ') }}</div>
+                            <details><summary>Редакция на потока</summary>
+                                <form class="edit-form" method="POST" action="{{ route('catalog.student-flows.update', $flow) }}">
+                                    @csrf @method('PATCH')
+                                    <label class="span">Име<input name="name" value="{{ $flow->name }}" required maxlength="255"></label>
+                                    <label class="span">Групи
+                                        <select name="student_group_ids[]" multiple size="5" required>
+                                            @foreach($groups as $group)
+                                                <option value="{{ $group->id }}" @selected($flow->groups->contains('id', $group->id))>{{ $group->specialty->name }} · {{ $group->course_year }} курс · {{ $group->group_name }}</option>
+                                            @endforeach
+                                        </select>
+                                    </label>
+                                    <button class="button" type="submit">Запази потока</button>
+                                </form>
+                            </details>
+                        </article>
+                    @empty
+                        <div class="empty">Няма добавени потоци.</div>
+                    @endforelse
+                </div>
+            </section>
+            @endif
+
+            @if($activeTab === 'subjects')
+            <section class="card">
+                <div class="section-head"><div><h2>Дисциплини</h2><p>АЗ, лекции, упражнения, самоподготовка и форма на контрол</p></div><span class="pill">{{ $subjects->count() }}</span></div>
                 <form class="forms" method="POST" action="{{ route('catalog.subjects.store') }}">
                     @csrf
                     <label>Код<input name="code" maxlength="50"></label>
                     <label>Наименование<input name="name" required></label>
-                    <label>Тип<select name="type" required><option value="lecture">Лекция</option><option value="exercise">Упражнение</option><option value="atelier">Ателие</option><option value="practice">Практика</option><option value="selfstudy">Самоподготовка</option><option value="stream_lecture">Поточна лекция</option></select></label>
-                    <label>Часове по подразбиране<input name="default_hours" type="number" min="0" max="40" value="0" required></label>
+                    <label>АЗ · аудиторна заетост<input name="auditorium_hours" type="number" min="0" max="1000" value="0" required></label>
+                    <label>Л · лекции<input name="lecture_hours" type="number" min="0" max="1000" value="0" required></label>
+                    <label>У · упражнения<input name="exercise_hours" type="number" min="0" max="1000" value="0" required></label>
+                    <label>Самоподготовка<input name="self_study_hours" type="number" min="0" max="1000" value="0" required></label>
+                    <label>Форма на контрол<select name="control_type"><option value="">Не е зададена</option><option value="И">Изпит (И)</option><option value="ТО">Текущ контрол (ТО)</option><option value="П">Продължаваща дисциплина (П)</option></select></label>
                     <button class="button primary span" type="submit">Добави дисциплина</button>
                 </form>
                 <div class="list">
                     @forelse($subjects as $subject)
                         <article class="item">
-                            <div class="row-head"><strong>{{ $subject->name }}</strong><span class="muted">{{ $subject->code }} · {{ $subject->type }}</span></div>
-                            <div class="muted">{{ $subject->curriculum_subjects_count }} включвания в планове</div>
+                            <div class="row-head"><strong>{{ $subject->name }}</strong><span class="muted">{{ $subject->code }}</span></div>
+                            <div class="muted">АЗ {{ $subject->auditorium_hours }} · Л {{ $subject->lecture_hours }} · У {{ $subject->exercise_hours }} · самоподготовка {{ $subject->self_study_hours }} · контрол {{ $subject->control_type ?: '—' }} · {{ $subject->curriculum_subjects_count }} включвания в планове</div>
                             <details><summary>Редакция</summary>
                                 <form class="edit-form" method="POST" action="{{ route('catalog.subjects.update', $subject) }}">
                                     @csrf @method('PATCH')
                                     <label>Код<input name="code" value="{{ $subject->code }}"></label>
                                     <label>Наименование<input name="name" value="{{ $subject->name }}" required></label>
-                                    <label>Тип<select name="type">@foreach(['lecture'=>'Лекция','exercise'=>'Упражнение','atelier'=>'Ателие','practice'=>'Практика','selfstudy'=>'Самоподготовка','stream_lecture'=>'Поточна лекция'] as $type => $label)<option value="{{ $type }}" @selected($subject->type === $type)>{{ $label }}</option>@endforeach</select></label>
-                                    <label>Часове<input name="default_hours" type="number" min="0" value="{{ $subject->default_hours }}" required></label>
+                                    <label>АЗ<input name="auditorium_hours" type="number" min="0" max="1000" value="{{ $subject->auditorium_hours }}" required></label>
+                                    <label>Лекции<input name="lecture_hours" type="number" min="0" max="1000" value="{{ $subject->lecture_hours }}" required></label>
+                                    <label>Упражнения<input name="exercise_hours" type="number" min="0" max="1000" value="{{ $subject->exercise_hours }}" required></label>
+                                    <label>Самоподготовка<input name="self_study_hours" type="number" min="0" max="1000" value="{{ $subject->self_study_hours }}" required></label>
+                                    <label>Контрол<select name="control_type"><option value="" @selected(!$subject->control_type)>Не е зададен</option><option value="И" @selected($subject->control_type === 'И')>Изпит (И)</option><option value="ТО" @selected($subject->control_type === 'ТО')>Текущ контрол (ТО)</option><option value="П" @selected($subject->control_type === 'П')>Продължаваща дисциплина (П)</option></select></label>
                                     <button class="button" type="submit">Запази</button>
                                 </form>
                             </details>
@@ -199,86 +269,28 @@
                     @endforelse
                 </div>
             </section>
+            @endif
 
-            <section class="card wide">
-                <div class="section-head"><div><h2>Предметно-часова структура</h2><p>Всяко включване пази семестъра, курса, часовете и седмиците от цикъла</p></div><span class="pill">{{ $curriculumSubjects->count() }}</span></div>
-                <form class="forms" method="POST" action="{{ route('catalog.curriculum-subjects.store') }}">
-                    @csrf
-                    <label>Версия<select name="curriculum_version_id" required>@foreach($curriculumVersions as $version)<option value="{{ $version->id }}">{{ $version->specialty->name }} · {{ $version->name }}</option>@endforeach</select></label>
-                    <label>Дисциплина<select name="subject_id" required>@foreach($subjects as $subject)<option value="{{ $subject->id }}">{{ $subject->name }} ({{ $subject->type }})</option>@endforeach</select></label>
-                    <label>Курс<input name="course_year" type="number" min="1" max="6" value="1" required></label>
-                    <label>Семестър №<input name="semester_no" type="number" min="1" max="12" value="1" required></label>
-                    <label>Контактни часове<input name="contact_hours" type="number" min="0" value="0" required></label>
-                    <label>Самоподготовка<input name="self_study_hours" type="number" min="0" value="0" required></label>
-                    <label>Зададени часове<input name="scheduled_hours" type="number" min="0" value="3" required></label>
-                    <label>Контрол<input name="control_type" placeholder="Изпит / проект"></label>
-                    <label>Седмици от цикъла<input name="cycle_weeks" value="1,2,3" pattern="[1-3](,[1-3])*" required><span class="help">Въведете 1, 2, 3 или комбинация, например 1,3.</span></label>
-                    <button class="button primary" type="submit">Добави в учебен план</button>
-                </form>
-                <div class="list">
-                    @forelse($curriculumSubjects as $item)
-                        <article class="item">
-                            <div class="row-head">
-                                <div><strong>{{ $item->curriculumVersion->specialty->name }} · {{ $item->subject->name }}</strong><div class="muted">{{ $item->course_year }} курс · семестър {{ $item->semester_no }} · план {{ $item->curriculumVersion->name }}</div></div>
-                                <span class="muted">{{ $item->contact_hours }} контактни · {{ $item->self_study_hours }} самоподготовка · седмици {{ $item->cycle_weeks !== null ? implode(', ', $item->cycle_weeks) : 'не са зададени' }}</span>
-                            </div>
-                            @if(!empty($item->source_data['columns']))
-                                <details><summary>Импортирани данни и забележки</summary>
-                                    <div class="muted">@foreach($item->source_data['columns'] as $label => $value){{ $label }}: {{ $value !== '' ? $value : '—' }}@if(!$loop->last) · @endif @endforeach</div>
-                                    @if(!empty($item->source_data['warnings']))<ul class="muted">@foreach($item->source_data['warnings'] as $warning)<li>{{ $warning }}</li>@endforeach</ul>@endif
-                                </details>
-                            @endif
-                        </article>
-                    @empty
-                        <div class="empty">Няма дисциплини в учебните планове.</div>
-                    @endforelse
-                </div>
-            </section>
-
+            @if($activeTab === 'teachers')
             <section class="card">
-                <div class="section-head"><div><h2>Преподаватели</h2><p>Дневна/седмична натовареност и предпочитани дни</p></div><span class="pill">{{ $teachers->count() }}</span></div>
-                <form class="forms" method="POST" action="{{ route('catalog.teachers.store') }}">
-                    @csrf
-                    <label>Име<input name="first_name" required></label>
-                    <label>Фамилия<input name="last_name" required></label>
-                    <label class="span">Академична длъжност<input name="title" placeholder="доц. д-р"></label>
-                    <label>Макс. часа на ден<input name="max_daily_hours" type="number" min="1" max="16" value="8" required></label>
-                    <label>Натовареност / седмица<input name="weekly_workload_hours" type="number" min="0" max="80" value="0" required></label>
-                    <label>Предпочитани дни<input name="preferred_weekdays" placeholder="1,3"></label>
-                    <label>Забранени дни<input name="unavailable_weekdays" placeholder="5"></label>
-                    <label class="span">Недостъпни периоди<input name="unavailable_periods" placeholder="1/2/08:00-10:00;3/5/13:00-15:00"><span class="help">Формат: седмица/ден/начало-край; дните са 1–5.</span></label>
-                    <button class="button primary span" type="submit">Добави преподавател</button>
-                </form>
+                <div class="section-head">
+                    <div><h2>Преподаватели</h2><p>Отворете досието за редакция, предпочитани дни и обезпеченост.</p></div>
+                    <a class="button primary" href="{{ route('catalog.teachers.create') }}">Добави преподавател</a>
+                </div>
                 <div class="list">
                     @forelse($teachers as $teacher)
-                        @php
-                            $teacherPeriods = collect($teacher->unavailable_periods ?? [])->map(fn ($period) => $period['cycle_week'].'/'.$period['weekday_no'].'/'.substr($period['start_time'], 0, 5).'-'.substr($period['end_time'], 0, 5))->implode(';');
-                        @endphp
                         <article class="item">
-                            <div class="row-head"><strong>{{ $teacher->title }} {{ $teacher->first_name }} {{ $teacher->last_name }}</strong><span class="pill {{ $teacher->active ? '' : 'off' }}">{{ $teacher->active ? 'Активен' : 'Неактивен' }}</span></div>
+                            <a class="row-head" href="{{ route('catalog.teachers.show', $teacher) }}"><strong>{{ $teacher->title }} {{ $teacher->first_name }} {{ $teacher->last_name }}</strong><span class="pill {{ $teacher->active ? '' : 'off' }}">{{ $teacher->active ? 'Активен' : 'Неактивен' }}</span></a>
                             <div class="muted">До {{ $teacher->max_daily_hours }} ч./ден · {{ $teacher->weekly_workload_hours }} ч./седмица · {{ $teacher->assignments_count }} дисциплини</div>
-                            <details><summary>Редакция</summary>
-                                <form class="edit-form" method="POST" action="{{ route('catalog.teachers.update', $teacher) }}">
-                                    @csrf @method('PATCH')
-                                    <label>Име<input name="first_name" value="{{ $teacher->first_name }}" required></label>
-                                    <label>Фамилия<input name="last_name" value="{{ $teacher->last_name }}" required></label>
-                                    <label>Длъжност<input name="title" value="{{ $teacher->title }}"></label>
-                                    <label>Макс. часа на ден<input name="max_daily_hours" type="number" min="1" max="16" value="{{ $teacher->max_daily_hours }}" required></label>
-                                    <label>Часа на седмица<input name="weekly_workload_hours" type="number" min="0" max="80" value="{{ $teacher->weekly_workload_hours }}" required></label>
-                                    <label>Предпочитани дни<input name="preferred_weekdays" value="{{ implode(',', $teacher->preferred_weekdays ?? []) }}"></label>
-                                    <label>Забранени дни<input name="unavailable_weekdays" value="{{ implode(',', $teacher->unavailable_weekdays ?? []) }}"></label>
-                                    <label class="span">Недостъпни периоди<input name="unavailable_periods" value="{{ $teacherPeriods }}" placeholder="1/2/08:00-10:00;3/5/13:00-15:00"></label>
-                                    <label>Активност<select name="active"><option value="1" @selected($teacher->active)>Активен</option><option value="0" @selected(!$teacher->active)>Неактивен</option></select></label>
-                                    <button class="button" type="submit">Запази</button>
-                                </form>
-                            </details>
                         </article>
                     @empty
                         <div class="empty">Няма добавени преподаватели.</div>
                     @endforelse
                 </div>
             </section>
+            @endif
 
+            @if($activeTab === 'organization')
             <section class="card">
                 <div class="section-head"><div><h2>Зали и ателиета</h2><p>Типът и капацитетът ограничават автоматичното разпределение</p></div><span class="pill">{{ $rooms->count() }}</span></div>
                 <form class="forms" method="POST" action="{{ route('catalog.rooms.store') }}">
@@ -287,7 +299,7 @@
                     <label>Тип<select name="room_type"><option value="lecture">Лекционна</option><option value="atelier">Ателие</option><option value="painting">Живопис</option><option value="graphics">Графика</option><option value="computer">Компютърна</option><option value="studio">Студио</option></select></label>
                     <label>Капацитет<input name="capacity" type="number" min="1" value="25" required></label>
                     <label>Оборудване<input name="equipment" placeholder="проектор, стативи"></label>
-                    <label class="span">Недостъпни периоди<input name="unavailable_periods" placeholder="1/2/08:00-10:00;3/5/13:00-15:00"><span class="help">Формат: седмица/ден/начало-край; дните са 1–5.</span></label>
+                    <label class="span">Недостъпни периоди<input name="unavailable_periods" placeholder="1/2/08:00-10:00;3/7/13:00-15:00"><span class="help">Формат: седмица/ден/начало-край; дните са 1–7 (Понеделник–Неделя).</span></label>
                     <button class="button primary span" type="submit">Добави зала</button>
                 </form>
                 <div class="list">
@@ -305,7 +317,7 @@
                                     <label>Тип<select name="room_type">@foreach(['lecture','atelier','computer','painting','graphics','studio'] as $type)<option value="{{ $type }}" @selected($room->room_type === $type)>{{ $type }}</option>@endforeach</select></label>
                                     <label>Капацитет<input name="capacity" type="number" min="1" max="1000" value="{{ $room->capacity }}" required></label>
                                     <label>Оборудване<input name="equipment" value="{{ implode(', ', $room->equipment ?? []) }}"></label>
-                                    <label class="span">Недостъпни периоди<input name="unavailable_periods" value="{{ $roomPeriods }}" placeholder="1/2/08:00-10:00;3/5/13:00-15:00"></label>
+                                    <label class="span">Недостъпни периоди<input name="unavailable_periods" value="{{ $roomPeriods }}" placeholder="1/2/08:00-10:00;3/7/13:00-15:00"></label>
                                     <label>Активност<select name="is_active"><option value="1" @selected($room->is_active)>Активна</option><option value="0" @selected(!$room->is_active)>Неактивна</option></select></label>
                                     <button class="button" type="submit">Запази</button>
                                 </form>
@@ -316,38 +328,87 @@
                     @endforelse
                 </div>
             </section>
-
-            <section class="card wide">
-                <div class="section-head"><div><h2>Преподавателска обезпеченост</h2><p>Свържете преподавател, дисциплина, курс и версия на плана</p></div><span class="pill">{{ $assignments->count() }}</span></div>
-                <form class="forms" method="POST" action="{{ route('catalog.teacher-assignments.store') }}">
-                    @csrf
-                    <label>Преподавател<select name="teacher_id" required>@foreach($teachers as $teacher)<option value="{{ $teacher->id }}">{{ $teacher->title }} {{ $teacher->first_name }} {{ $teacher->last_name }}</option>@endforeach</select></label>
-                    <label>Дисциплина<select name="subject_id" required>@foreach($subjects as $subject)<option value="{{ $subject->id }}">{{ $subject->name }}</option>@endforeach</select></label>
-                    <label>Версия на плана<select name="curriculum_version_id" required>@foreach($curriculumVersions as $version)<option value="{{ $version->id }}">{{ $version->specialty->name }} · {{ $version->name }}</option>@endforeach</select></label>
-                    <label>Курс<input name="course_year" type="number" min="1" max="6" value="1" required></label>
-                    <label>Семестър<select name="semester"><option value="">Всеки</option><option value="winter">Зимен</option><option value="summer">Летен</option></select></label>
-                    <button class="button primary" type="submit">Свържи преподавател</button>
-                </form>
-                <div class="list">
-                    @forelse($assignments as $assignment)
-                        <article class="item">
-                            <div class="row-head">
-                                <div><strong>{{ $assignment->subject->name }} · {{ $assignment->teacher->title }} {{ $assignment->teacher->first_name }} {{ $assignment->teacher->last_name }}</strong><div class="muted">{{ $assignment->curriculumVersion->specialty->name }} · {{ $assignment->course_year }} курс · {{ $assignment->semester ?: 'всеки семестър' }} · {{ $assignment->coverage_type ?: 'видът не е указан' }}</div></div>
-                                <span class="pill">{{ $assignment->curriculumVersion->name }}</span>
-                            </div>
-                            @if(!empty($assignment->source_data['columns']))
-                                <details><summary>Импортирани данни и забележки</summary>
-                                    <div class="muted">@foreach($assignment->source_data['columns'] as $label => $value){{ $label }}: {{ $value !== '' ? $value : '—' }}@if(!$loop->last) · @endif @endforeach</div>
-                                    @if(!empty($assignment->source_data['warnings']))<ul class="muted">@foreach($assignment->source_data['warnings'] as $warning)<li>{{ $warning }}</li>@endforeach</ul>@endif
-                                </details>
-                            @endif
-                        </article>
-                    @empty
-                        <div class="empty">Няма въведена преподавателска обезпеченост.</div>
-                    @endforelse
-                </div>
-            </section>
+            @endif
         </div>
     </main>
+    <style>
+        .catalog-list-tools { display:flex; gap:8px; align-items:center; padding:0 18px 12px; }
+        .catalog-list-tools input { flex:1; min-width:0; min-height:34px; margin:0; }
+        .catalog-list-tools button { min-height:34px; padding:0 10px; white-space:nowrap; }
+        .catalog-item-hidden { display:none !important; }
+        @media(max-width:520px) { .catalog-list-tools { align-items:stretch; flex-direction:column; } }
+    </style>
+    <script>
+        document.querySelectorAll('.card .list').forEach((list) => {
+            const items = Array.from(list.querySelectorAll(':scope > .item'));
+            if (items.length === 0) {
+                return;
+            }
+
+            items.forEach((item) => {
+                const actions = Array.from(item.querySelectorAll('form[action]'));
+                const teacherId = actions
+                    .map((form) => new URL(form.action, window.location.href).pathname.match(/\/admin\/catalog\/teachers\/(\d+)$/)?.[1])
+                    .find(Boolean);
+                const versionId = actions
+                    .map((form) => new URL(form.action, window.location.href).pathname.match(/\/admin\/catalog\/curriculum-versions\/(\d+)$/)?.[1])
+                    .find(Boolean);
+                const destination = teacherId
+                    ? `/admin/catalog/teachers/${teacherId}`
+                    : versionId
+                        ? `/admin/catalog/curriculum-versions/${versionId}`
+                        : null;
+                const label = teacherId ? 'Досие и обезпеченост' : 'Общ план';
+                const heading = item.querySelector('.row-head');
+
+                if (destination && heading && !item.querySelector('.catalog-detail-link')) {
+                    const link = document.createElement('a');
+                    link.className = 'button catalog-detail-link';
+                    link.href = destination;
+                    link.textContent = label;
+                    heading.append(link);
+                }
+            });
+
+            const tools = document.createElement('div');
+            tools.className = 'catalog-list-tools';
+            const search = document.createElement('input');
+            search.type = 'search';
+            search.placeholder = 'Търсене в списъка';
+            search.setAttribute('aria-label', 'Търсене в списъка');
+
+            const toggle = document.createElement('button');
+            toggle.type = 'button';
+            toggle.className = 'button';
+            toggle.textContent = `Всички (${items.length})`;
+            let expanded = false;
+
+            const update = () => {
+                const query = search.value.trim().toLocaleLowerCase('bg');
+                let visible = 0;
+                items.forEach((item) => {
+                    const matches = item.textContent.toLocaleLowerCase('bg').includes(query);
+                    const show = matches && (expanded || query !== '' || visible < 5);
+                    item.classList.toggle('catalog-item-hidden', !show);
+                    if (matches) {
+                        visible++;
+                    }
+                });
+                toggle.textContent = expanded ? 'Покажи по-малко' : `Всички (${items.length})`;
+                toggle.hidden = query !== '';
+                toggle.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+            };
+
+            search.addEventListener('input', update);
+            toggle.addEventListener('click', () => {
+                expanded = !expanded;
+                update();
+            });
+
+            tools.append(search, toggle);
+            list.before(tools);
+            update();
+        });
+    </script>
 </body>
 </html>

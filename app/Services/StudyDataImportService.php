@@ -79,6 +79,14 @@ class StudyDataImportService
                         ->where('course_year', $row['course_year'])
                         ->exists();
 
+                    $subject->update([
+                        'auditorium_hours' => $row['auditorium_hours'] ?? $row['contact_hours'] ?? 0,
+                        'lecture_hours' => $row['lecture_hours'] ?? 0,
+                        'exercise_hours' => $row['exercise_hours'] ?? 0,
+                        'self_study_hours' => $row['self_study_hours'] ?? 0,
+                        'control_type' => $row['normalized_control_type'],
+                    ]);
+
                     if ($exists) {
                         $skipped++;
 
@@ -90,11 +98,6 @@ class StudyDataImportService
                         'subject_id' => $subject->id,
                         'semester_no' => $row['semester_no'],
                         'course_year' => $row['course_year'],
-                        'contact_hours' => $row['contact_hours'] ?? 0,
-                        'self_study_hours' => $row['self_study_hours'] ?? 0,
-                        'scheduled_hours' => $row['scheduled_hours'] ?? 0,
-                        'cycle_weeks' => null,
-                        'control_type' => $row['control_type'],
                         'source_data' => [
                             'columns' => $row['source'],
                             'warnings' => $row['warnings'],
@@ -183,10 +186,13 @@ class StudyDataImportService
                 ? $courseYear
                 : ($semesterNo === null ? null : (int) ceil($semesterNo / 2));
             $contactHours = $this->number($this->cell($cells, $indexes['contact_hours']));
+            $auditoriumHours = $this->number($this->cell($cells, $indexes['auditorium_hours']));
+            $lectureHours = $this->number($this->cell($cells, $indexes['lecture_hours']));
+            $exerciseHours = $this->number($this->cell($cells, $indexes['exercise_hours']));
             $selfStudyHours = $this->number($this->cell($cells, $indexes['self_study_hours']));
             $scheduledHours = $this->number($this->cell($cells, $indexes['scheduled_hours']));
-            $sourceType = $this->sourceSubjectType($this->cell($cells, $indexes['source_type']));
             $controlType = $this->cell($cells, $indexes['control_type']) ?: null;
+            $normalizedControlType = $this->normalizeControlType($controlType);
             $candidateSubjects = $this->findSubjectCandidates($subjects, $code, $name);
             $warnings = [];
             $isSemesterSummary = $code === '0'
@@ -213,18 +219,20 @@ class StudyDataImportService
             if ($contactHours === null) {
                 $warnings[] = 'Контактните часове липсват в източника и ще останат 0.';
             }
+            if ($lectureHours === null) {
+                $warnings[] = 'Часовете за лекции (Л) липсват в източника; стойността остава неизвестна.';
+            }
+            if ($exerciseHours === null) {
+                $warnings[] = 'Часовете за упражнения (У) липсват в източника; стойността остава неизвестна.';
+            }
+            if ($auditoriumHours === null) {
+                $warnings[] = 'Аудиторната заетост (АЗ) липсва в източника; стойността остава неизвестна.';
+            }
             if ($selfStudyHours === null) {
                 $warnings[] = 'Часовете за самоподготовка липсват в източника и ще останат 0.';
             }
-            if ($scheduledHours === null) {
-                $warnings[] = 'Седмичните часове за разписание липсват в източника и ще останат 0.';
-            }
-            $warnings[] = 'Седмиците от цикъла липсват в източника и трябва да бъдат зададени преди генериране на разписание.';
-            if ($candidateSubjects === [] && $sourceType === null) {
-                $warnings[] = 'Типът на дисциплината липсва в източника; при създаване ще се използва системният тип „лекция“.';
-            }
-            if ($candidateSubjects === []) {
-                $warnings[] = 'Часовете по подразбиране за новата дисциплина липсват в източника и ще останат 0.';
+            if ($controlType !== null && $normalizedControlType === null) {
+                $warnings[] = 'Формата на контрол не е разпозната; оригиналната стойност е запазена в импортираните данни.';
             }
 
             $duplicate = count($candidateSubjects) === 1 && $semesterNo !== null && $courseYear !== null
@@ -240,13 +248,16 @@ class StudyDataImportService
                 'source' => $source,
                 'subject_name' => $name,
                 'subject_code' => $code,
-                'source_type' => $sourceType,
                 'semester_no' => $semesterNo,
                 'course_year' => $courseYear,
                 'contact_hours' => $contactHours,
+                'auditorium_hours' => $auditoriumHours,
+                'lecture_hours' => $lectureHours,
+                'exercise_hours' => $exerciseHours,
                 'self_study_hours' => $selfStudyHours,
                 'scheduled_hours' => $scheduledHours,
                 'control_type' => $controlType,
+                'normalized_control_type' => $normalizedControlType,
                 'subject_candidates' => $candidateSubjects,
                 'status' => $duplicate ? 'already_imported' : $this->candidateStatus($candidateSubjects),
                 'valid' => $name !== ''
@@ -298,6 +309,7 @@ class StudyDataImportService
         foreach ($dataRows as $cells) {
             $name = $this->cell($cells, $personIndex);
             $coverage = $this->cell($cells, $coverageIndex);
+            $coverageType = $this->normalizeCoverageType($coverage);
             $rowSemester = $this->number($this->cell($cells, $semesterIndex));
 
             if ($rowSemester !== null && $rowSemester >= 1 && $rowSemester <= 12) {
@@ -353,6 +365,8 @@ class StudyDataImportService
             }
             if ($coverage === '') {
                 $warnings[] = 'Видът на обезпечеността липсва в източника.';
+            } elseif ($coverageType === null) {
+                $warnings[] = 'Видът на обезпечеността не е разпознат като лекции или упражнения; редът ще бъде запазен без типово покритие.';
             }
             $subjectStatus = $this->candidateStatus($candidateSubjects);
             $teacherStatus = $this->candidateStatus($candidateTeachers);
@@ -361,14 +375,14 @@ class StudyDataImportService
                 'source' => $source,
                 'subject_name' => $currentSubject,
                 'subject_code' => '',
-                'source_type' => null,
                 'subject_candidates' => $candidateSubjects,
                 'teacher_name' => $name,
                 'teacher_parts' => $person,
                 'teacher_candidates' => $candidateTeachers,
                 'semester_no' => $semesterNo,
                 'course_year' => $courseYear,
-                'coverage_type' => $coverage,
+                'coverage_type' => $coverageType,
+                'coverage_label' => $coverage,
                 'department' => $this->cell($cells, $departmentIndex),
                 'status' => $subjectStatus === 'ambiguous' || $teacherStatus === 'ambiguous'
                     ? 'ambiguous'
@@ -627,14 +641,28 @@ class StudyDataImportService
             'semester' => null,
             'course_year' => null,
             'contact_hours' => null,
+            'auditorium_hours' => null,
+            'lecture_hours' => null,
+            'exercise_hours' => null,
             'self_study_hours' => null,
             'scheduled_hours' => null,
             'control_type' => null,
-            'source_type' => null,
         ];
 
         foreach ($headers as $index => $header) {
             $normalized = $this->normalize($header);
+
+            if (
+                $indexes['lecture_hours'] === null
+                && (in_array($normalized, ['л', 'л.'], true) || str_contains($normalized, 'лекци'))
+            ) {
+                $indexes['lecture_hours'] = $index;
+            } elseif (
+                $indexes['exercise_hours'] === null
+                && (in_array($normalized, ['у', 'у.'], true) || str_contains($normalized, 'упражнен'))
+            ) {
+                $indexes['exercise_hours'] = $index;
+            }
 
             if ($indexes['code'] === null && (str_contains($normalized, 'код') || str_contains($normalized, 'шифр') || str_contains($normalized, 'code'))) {
                 $indexes['code'] = $index;
@@ -659,10 +687,10 @@ class StudyDataImportService
                 || str_contains($normalized, 'аудиторни занятия')
             )) {
                 $indexes['contact_hours'] = $index;
-            } elseif ($indexes['source_type'] === null && (str_contains($normalized, 'тип дисциплин') || str_contains($normalized, 'вид дисциплин'))) {
-                $indexes['source_type'] = $index;
             }
         }
+
+        $indexes['auditorium_hours'] = $indexes['contact_hours'];
 
         return $indexes;
     }
@@ -725,6 +753,18 @@ class StudyDataImportService
         $number = (float) $value;
 
         return $number >= 0 && $number <= 10000 && floor($number) === $number ? (int) $number : null;
+    }
+
+    private function normalizeControlType(?string $value): ?string
+    {
+        $normalized = $this->normalize($value ?? '');
+
+        return match (true) {
+            str_contains($normalized, 'изпит') => 'И',
+            str_contains($normalized, 'текущ') => 'ТО',
+            str_contains($normalized, 'продължаващ') => 'П',
+            default => null,
+        };
     }
 
     private function sourceSubjectType(string $value): ?string
@@ -854,8 +894,6 @@ class StudyDataImportService
         $subject = Subject::query()->create([
             'code' => $subjectCode ?: null,
             'name' => $row['subject_name'],
-            'type' => $row['source_type'] ?: 'lecture',
-            'default_hours' => 0,
         ]);
         $createdSubjects[$key] = $subject->id;
 
@@ -933,6 +971,15 @@ class StudyDataImportService
         $value = mb_strtolower(trim($this->repairMojibake($value)));
 
         return preg_replace('/[^\p{L}\p{N}]+/u', ' ', $value) ?? $value;
+    }
+
+    private function normalizeCoverageType(string $value): ?string
+    {
+        return match ($this->normalize($value)) {
+            'лекции', 'лекция', 'lecture' => 'lecture',
+            'упражнения', 'упражнение', 'exercise' => 'exercise',
+            default => null,
+        };
     }
 
     private function repairMojibake(string $value): string

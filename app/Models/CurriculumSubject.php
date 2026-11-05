@@ -14,18 +14,12 @@ class CurriculumSubject extends Model
         'subject_id',
         'semester_no',
         'course_year',
-        'contact_hours',
-        'self_study_hours',
-        'scheduled_hours',
-        'cycle_weeks',
-        'control_type',
         'source_data',
     ];
 
     protected function casts(): array
     {
         return [
-            'cycle_weeks' => 'array',
             'source_data' => 'array',
         ];
     }
