@@ -381,7 +381,7 @@ it('generates editable sessions on a preferred Saturday without configured time 
     $entries = collect($result['entries']);
 
     expect($entries)->toHaveCount(3)
-        ->and($entries->pluck('weekday_no')->unique()->all())->toContain(6)
+        ->and($entries->pluck('weekday_no')->max())->toBeLessThanOrEqual(5)
         ->and($entries->pluck('cycle_week')->unique()->all())->toHaveCount(1)
         ->and($entries->pluck('start_time')->unique()->all())->toBe(['08:00:00'])
         ->and($entries->pluck('end_time')->unique()->all())->toBe(['11:45:00'])
@@ -707,8 +707,52 @@ it('allocates the 45-hour example in one recurring week and counts excess as sel
         ->and($entries->pluck('duration_hours')->unique()->all())->toBe([4])
         ->and($analysis['auditorium_hours'])->toBe(45)
         ->and($analysis['scheduled_hours'])->toBe(60)
-        ->and($analysis['self_study_hours'])->toBe(20)
-        ->and($result['warnings'][0]['reason'])->toContain('добавя 15 ч. самоподготовка');
+        ->and($analysis['self_study_hours'])->toBe(15)
+        ->and($result['warnings'][0]['reason'])->toContain('добавя 10 ч. самоподготовка');
+});
+
+it('adds self-study hours to the scheduled workload', function () {
+    $fixtures = createScheduleFixtures();
+    $fixtures['subject']->update(['auditorium_hours' => 60, 'lecture_hours' => 60, 'self_study_hours' => 40]);
+    $fixtures['teacher']->update(['weekly_workload_hours' => 0]);
+
+    $result = app(ScheduleService::class)->generateForGroup($fixtures['group'], '2026/2027', 'winter');
+
+    expect($result['entries'])->toHaveCount(5)
+        ->and(collect($result['entries'])->max('weekday_no'))->toBeLessThanOrEqual(5);
+});
+
+it('moves an entry between weeks without copying it or blocking the freed slot', function () {
+    $fixtures = createScheduleFixtures();
+    $service = app(ScheduleService::class);
+    $entry = $service->addManualEntry([
+        'group_id' => $fixtures['group']->id,
+        'subject_id' => null,
+        'custom_subject_name' => 'Тест',
+        'teacher_id' => null,
+        'room_id' => null,
+        'academic_year' => '2026/2027',
+        'semester_type' => 'winter',
+        'cycle_week' => 1,
+        'weekday_no' => 1,
+        'start_time' => '08:00:00',
+        'end_time' => '11:45:00',
+        'duration_hours' => 4,
+        'note' => null,
+    ]);
+    $service->moveEntry($entry, [
+        'cycle_week' => 2,
+        'weekday_no' => 2,
+        'start_time' => '13:00:00',
+        'end_time' => '16:45:00',
+        'duration_hours' => 4,
+        'teacher_id' => null,
+        'room_id' => null,
+        'locked' => true,
+    ]);
+
+    expect(TimetableEntry::query()->count())->toBe(1)
+        ->and($entry->refresh()->cycle_week)->toBe(2);
 });
 
 it('keeps hours missing from the lecture and exercise split unassigned instead of guessing', function () {

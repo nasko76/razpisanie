@@ -121,6 +121,15 @@ class ScheduleService
                     ];
                 }
 
+                $selfStudyHours = (int) $subject->self_study_hours;
+                if ($selfStudyHours > 0) {
+                    $largestPart = array_key_first(array_filter(
+                        array_column($lessonParts, 'hours'),
+                        fn (int $hours): bool => $hours === max(array_column($lessonParts, 'hours')),
+                    ));
+                    $lessonParts[$largestPart]['hours'] += $selfStudyHours;
+                }
+
                 foreach ($lessonParts as $lessonPart) {
                     if ($lessonPart['teacher'] === null) {
                         $warnings[] = [
@@ -199,7 +208,7 @@ class ScheduleService
                     }
                 }
 
-                $effectiveSelfStudy = (int) $subject->self_study_hours + $surplusHours;
+                $effectiveSelfStudy = max(0, (int) $scheduledHours - max($auditoriumHours, $plannedHours));
                 if ($surplusHours > 0) {
                     $warnings[] = [
                         'subject' => $subject->name,
@@ -300,7 +309,7 @@ class ScheduleService
             $subjectEntries = $entries->where('subject_id', $subject->id);
             $auditoriumHours = (int) $subject->auditorium_hours;
             $plannedHours = (int) $subject->lecture_hours + (int) $subject->exercise_hours;
-            $requiredHours = max($auditoriumHours, $plannedHours);
+            $requiredHours = max($auditoriumHours, $plannedHours) + (int) $subject->self_study_hours;
             $scheduledHours = $subjectEntries->sum('duration_hours') * self::COURSE_LENGTH_WEEKS / self::CYCLE_LENGTH_WEEKS;
 
             if ($requiredHours > 0 && $subjectEntries->isEmpty()) {
@@ -484,7 +493,6 @@ class ScheduleService
         $ranges = [
             ['start_time' => '08:00:00', 'end_time' => '11:45:00'],
             ['start_time' => '13:00:00', 'end_time' => '16:45:00'],
-            ['start_time' => '16:00:00', 'end_time' => '19:45:00'],
         ];
         $plans = [];
 
@@ -520,7 +528,11 @@ class ScheduleService
         $options = [];
 
         foreach ($cycleWeek === null ? [1, 2, 3] : [$cycleWeek] as $candidateWeek) {
-            foreach (self::WEEKDAYS as $weekdayNo => $dayName) {
+            foreach (array_keys(self::WEEKDAYS) as $weekdayNo) {
+                if ($weekdayNo > 5) {
+                    continue;
+                }
+
                 $candidate->cycle_week = $candidateWeek;
                 $candidate->weekday_no = $weekdayNo;
                 $conflictCount = count($this->conflicts($candidate));

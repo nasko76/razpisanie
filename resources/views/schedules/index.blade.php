@@ -248,8 +248,8 @@
                                                                     <input type="hidden" name="semester_type" value="{{ $semesterType }}">
                                                                     <label>Седмица
                                                                         <select name="cycle_week">
-                                                                            @foreach([1, 2, 3] as $week)
-                                                                                <option value="{{ $week }}" @selected($entry->cycle_week === $week)>{{ $week }}</option>
+                                                                            @foreach([1, 2, 3] as $weekOption)
+                                                                                <option value="{{ $weekOption }}" @selected($entry->cycle_week === $weekOption)>{{ $weekOption }}</option>
                                                                             @endforeach
                                                                         </select>
                                                                     </label>
@@ -422,7 +422,7 @@
                 if (!draggedEntry) return;
 
                 const form = draggedEntry.querySelector('.edit-form');
-                const targetStartMinutes = { morning: 8 * 60, afternoon: 13 * 60, evening: 16 * 60 }[zone.dataset.dropPart];
+                const targetStartMinutes = { morning: 8 * 60, afternoon: 13 * 60, evening: 17 * 60 }[zone.dataset.dropPart];
                 const [currentStartHour, currentStartMinute] = form.elements.start_time.value.split(':').map(Number);
                 const [currentEndHour, currentEndMinute] = form.elements.end_time.value.split(':').map(Number);
                 const elapsedMinutes = (currentEndHour * 60 + currentEndMinute) - (currentStartHour * 60 + currentStartMinute);
