@@ -17,7 +17,10 @@ return new class extends Migration
             $table->string('reason');
             $table->json('snapshot');
             $table->foreignId('created_by')->nullable()->constrained('users')->nullOnDelete();
-            $table->unique(['group_id', 'academic_year', 'semester_type', 'revision_no']);
+            $table->unique(
+                ['group_id', 'academic_year', 'semester_type', 'revision_no'],
+                'schedule_revisions_scope_revision_unique',
+            );
             $table->timestamps();
         });
     }
