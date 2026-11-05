@@ -2,7 +2,10 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\CurriculumSubject;
 use App\Models\Room;
+use App\Models\ScheduleNote;
+use App\Models\StudentFlow;
 use App\Models\StudentGroup;
 use App\Models\Teacher;
 use App\Models\TimetableEntry;
@@ -21,7 +24,7 @@ use Symfony\Component\HttpFoundation\StreamedResponse;
 
 class ScheduleController extends Controller
 {
-    public function index(Request $request): View
+    public function index(Request $request, ScheduleService $scheduleService): View
     {
         $filters = $request->validate([
             'group_id' => ['nullable', 'integer', 'exists:student_groups,id'],
@@ -44,15 +47,27 @@ class ScheduleController extends Controller
         $semesterType = $filters['semester_type'] ?? 'winter';
         $cycleWeek = (int) ($filters['cycle_week'] ?? 1);
         $entries = collect();
+        $curriculumSubjects = collect();
 
         if ($selectedGroup !== null) {
+            $semesterParity = $semesterType === 'winter' ? 1 : 0;
+            $curriculumSubjects = CurriculumSubject::query()
+                ->with('subject')
+                ->where('curriculum_version_id', $selectedGroup->curriculum_version_id)
+                ->where('course_year', $selectedGroup->course_year)
+                ->whereRaw('semester_no % 2 = ?', [$semesterParity])
+                ->orderBy('semester_no')
+                ->get();
             $entries = TimetableEntry::query()
-                ->with(['subject', 'teacher', 'room'])
-                ->where('group_id', $selectedGroup->id)
+                ->with(['subject', 'teacher', 'room', 'studentFlow'])
+                ->where(function ($query) use ($selectedGroup): void {
+                    $query->where('group_id', $selectedGroup->id)
+                        ->orWhereHas('studentFlow.groups', fn ($groupsQuery) => $groupsQuery->whereKey($selectedGroup->id));
+                })
                 ->where('academic_year', $academicYear)
                 ->where('semester_type', $semesterType)
-                ->where('cycle_week', $cycleWeek)
                 ->orderBy('weekday_no')
+                ->orderBy('cycle_week')
                 ->orderBy('start_time')
                 ->get();
         }
@@ -63,12 +78,25 @@ class ScheduleController extends Controller
             'academicYear' => $academicYear,
             'semesterType' => $semesterType,
             'cycleWeek' => $cycleWeek,
+            'curriculumSubjects' => $curriculumSubjects,
+            'note' => $selectedGroup === null ? null : ScheduleNote::query()
+                ->where('group_id', $selectedGroup->id)
+                ->where('academic_year', $academicYear)
+                ->where('semester_type', $semesterType)
+                ->value('note'),
             'entries' => $entries,
             'teachers' => Teacher::query()->where('active', true)->orderBy('last_name')->get(),
             'rooms' => Room::query()->where('is_active', true)->orderBy('name')->get(),
-            'blocks' => ScheduleService::BLOCKS,
+            'studentFlows' => StudentFlow::query()->orderBy('name')->get(),
+            'teacherNamesBySubject' => $this->teacherNamesBySubject($entries),
+            'dayParts' => [
+                ['key' => 'morning', 'label' => 'Сутрин', 'after' => null, 'before' => '12:00'],
+                ['key' => 'afternoon', 'label' => 'Следобед', 'after' => '12:00', 'before' => '16:00'],
+                ['key' => 'evening', 'label' => 'Вечер', 'after' => '16:00', 'before' => null],
+            ],
             'weekdays' => ScheduleService::WEEKDAYS,
-            'unscheduled' => session('unscheduled', []),
+            'scheduleTested' => session('schedule_tested', false),
+            'scheduleTestWarnings' => session('schedule_test_warnings', []),
         ]);
     }
 
@@ -89,7 +117,29 @@ class ScheduleController extends Controller
             'semester_type' => $data['semester_type'],
         ])->with([
             'status' => 'Генерирани са '.count($result['entries']).' занятия.',
-            'unscheduled' => $result['unscheduled'],
+        ]);
+    }
+
+    public function test(Request $request, ScheduleService $scheduleService): RedirectResponse
+    {
+        $data = $request->validate([
+            'group_id' => ['required', 'integer', 'exists:student_groups,id'],
+            'academic_year' => ['required', 'string', 'max:20'],
+            'semester_type' => ['required', 'in:winter,summer'],
+        ]);
+        $group = StudentGroup::query()->findOrFail($data['group_id']);
+        $warnings = $scheduleService->testSchedule($group, $data['academic_year'], $data['semester_type']);
+
+        return redirect()->route('schedules.index', [
+            'group_id' => $group->id,
+            'academic_year' => $data['academic_year'],
+            'semester_type' => $data['semester_type'],
+        ])->with([
+            'schedule_tested' => true,
+            'schedule_test_warnings' => $warnings,
+            'status' => $warnings === []
+                ? 'Проверката приключи: не са открити забележки.'
+                : 'Проверката приключи. Намерени са '.count($warnings).' забележки или препоръки.',
         ]);
     }
 
@@ -131,16 +181,30 @@ class ScheduleController extends Controller
     public function update(Request $request, TimetableEntry $entry, ScheduleService $scheduleService): RedirectResponse|JsonResponse
     {
         $data = $request->validate([
-            'block' => ['required', 'integer', 'between:0,3'],
             'cycle_week' => ['required', 'integer', 'between:1,3'],
-            'weekday_no' => ['required', 'integer', 'between:1,5'],
+            'weekday_no' => ['required', 'integer', 'between:1,7'],
+            'start_time' => ['required', 'date_format:H:i'],
+            'end_time' => ['required', 'date_format:H:i', 'after:start_time'],
+            'duration_hours' => ['required', 'integer', 'between:1,16'],
             'teacher_id' => ['nullable', 'integer', 'exists:teachers,id'],
-            'room_id' => ['required', 'integer', 'exists:rooms,id'],
+            'room_id' => ['nullable', 'integer', 'exists:rooms,id'],
+            'coverage_type' => ['nullable', 'in:lecture,exercise'],
+            'student_flow_id' => ['nullable', 'integer', 'exists:student_flows,id'],
+            'custom_subject_name' => ['nullable', 'string', 'max:255'],
+            'note' => ['nullable', 'string', 'max:2000'],
             'locked' => ['sometimes', 'boolean'],
         ]);
 
         $data['teacher_id'] = isset($data['teacher_id']) ? (int) $data['teacher_id'] : null;
-        $data['room_id'] = (int) $data['room_id'];
+        $data['room_id'] = isset($data['room_id']) ? (int) $data['room_id'] : null;
+        $data['start_time'] .= ':00';
+        $data['end_time'] .= ':00';
+        if (isset($data['student_flow_id']) && ! StudentFlow::query()
+            ->whereKey($data['student_flow_id'])
+            ->whereHas('groups', fn ($query) => $query->whereKey($entry->group_id))
+            ->exists()) {
+            throw ValidationException::withMessages(['student_flow_id' => 'Избраната група не е част от този поток.']);
+        }
         $data['locked'] = $request->boolean('locked');
 
         $scheduleService->moveEntry($entry, $data);
@@ -155,6 +219,73 @@ class ScheduleController extends Controller
             'semester_type',
             'cycle_week',
         ]))->with('status', 'Промените са запазени.');
+    }
+
+    public function storeManualEntry(Request $request, ScheduleService $scheduleService): RedirectResponse
+    {
+        $data = $request->validate([
+            'group_id' => ['required', 'integer', 'exists:student_groups,id'],
+            'academic_year' => ['required', 'string', 'max:20'],
+            'semester_type' => ['required', 'in:winter,summer'],
+            'cycle_week' => ['required', 'integer', 'between:1,3'],
+            'weekday_no' => ['required', 'integer', 'between:1,7'],
+            'start_time' => ['required', 'date_format:H:i'],
+            'end_time' => ['required', 'date_format:H:i', 'after:start_time'],
+            'duration_hours' => ['required', 'integer', 'between:1,16'],
+            'subject_id' => ['nullable', 'integer', 'exists:subjects,id'],
+            'custom_subject_name' => ['required_without:subject_id', 'nullable', 'string', 'max:255'],
+            'teacher_id' => ['nullable', 'integer', 'exists:teachers,id'],
+            'room_id' => ['nullable', 'integer', 'exists:rooms,id'],
+            'coverage_type' => ['nullable', 'in:lecture,exercise'],
+            'student_flow_id' => ['nullable', 'integer', 'exists:student_flows,id'],
+            'note' => ['nullable', 'string', 'max:2000'],
+        ]);
+        $data['group_id'] = (int) $data['group_id'];
+        $data['subject_id'] = isset($data['subject_id']) ? (int) $data['subject_id'] : null;
+        $data['teacher_id'] = isset($data['teacher_id']) ? (int) $data['teacher_id'] : null;
+        $data['room_id'] = isset($data['room_id']) ? (int) $data['room_id'] : null;
+        $data['start_time'] .= ':00';
+        $data['end_time'] .= ':00';
+        if (isset($data['student_flow_id']) && ! StudentFlow::query()
+            ->whereKey($data['student_flow_id'])
+            ->whereHas('groups', fn ($query) => $query->whereKey($data['group_id']))
+            ->exists()) {
+            throw ValidationException::withMessages(['student_flow_id' => 'Избраната група не е част от този поток.']);
+        }
+
+        $entry = $scheduleService->addManualEntry($data);
+
+        return redirect()->route('schedules.index', [
+            'group_id' => $entry->group_id,
+            'academic_year' => $entry->academic_year,
+            'semester_type' => $entry->semester_type,
+            'cycle_week' => $entry->cycle_week,
+        ])->with('status', 'Ръчното занятие е добавено.');
+    }
+
+    public function updateNote(Request $request): RedirectResponse
+    {
+        $data = $request->validate([
+            'group_id' => ['required', 'integer', 'exists:student_groups,id'],
+            'academic_year' => ['required', 'string', 'max:20'],
+            'semester_type' => ['required', 'in:winter,summer'],
+            'note' => ['nullable', 'string', 'max:5000'],
+        ]);
+        ScheduleNote::query()->updateOrCreate(
+            [
+                'group_id' => $data['group_id'],
+                'academic_year' => $data['academic_year'],
+                'semester_type' => $data['semester_type'],
+            ],
+            ['note' => $data['note'] ?? null],
+        );
+
+        return redirect()->route('schedules.index', $request->only([
+            'group_id',
+            'academic_year',
+            'semester_type',
+            'cycle_week',
+        ]))->with('status', 'Бележката към графика е запазена.');
     }
 
     public function destroy(Request $request, TimetableEntry $entry, ScheduleService $scheduleService): RedirectResponse
@@ -195,7 +326,13 @@ class ScheduleController extends Controller
             'entries' => $entries,
             'academicYear' => $academicYear,
             'semesterType' => $semesterType,
+            'note' => ScheduleNote::query()
+                ->where('group_id', $group->id)
+                ->where('academic_year', $academicYear)
+                ->where('semester_type', $semesterType)
+                ->value('note'),
             'weekdays' => ScheduleService::WEEKDAYS,
+            'teacherNamesBySubject' => $this->teacherNamesBySubject($entries),
         ])->download('raspisanie-grupa-'.$group->id.'.pdf');
     }
 
@@ -210,11 +347,17 @@ class ScheduleController extends Controller
         $semesterType = $filters['semester_type'] ?? 'winter';
         $entries = $this->entriesForGroup($group, $academicYear, $semesterType);
         $weekdays = ScheduleService::WEEKDAYS;
+        $scheduleNote = ScheduleNote::query()
+            ->where('group_id', $group->id)
+            ->where('academic_year', $academicYear)
+            ->where('semester_type', $semesterType)
+            ->value('note');
+        $teacherNamesBySubject = $this->teacherNamesBySubject($entries);
 
-        return ResponseFacade::streamDownload(function () use ($entries, $weekdays): void {
+        return ResponseFacade::streamDownload(function () use ($entries, $weekdays, $scheduleNote, $teacherNamesBySubject): void {
             $output = fopen('php://output', 'w');
             fwrite($output, "\xEF\xBB\xBF");
-            fputcsv($output, ['Седмица', 'Ден', 'Начало', 'Край', 'Дисциплина', 'Преподавател', 'Зала'], ';');
+            fputcsv($output, ['Седмица', 'Ден', 'Начало', 'Край', 'Дисциплина', 'Преподаватели', 'Зала', 'Бележка към занятието', 'Бележка към графика'], ';');
 
             foreach ($entries as $entry) {
                 fputcsv($output, [
@@ -222,9 +365,11 @@ class ScheduleController extends Controller
                     $weekdays[$entry->weekday_no] ?? $entry->weekday_no,
                     substr($entry->start_time, 0, 5),
                     substr($entry->end_time, 0, 5),
-                    $entry->subject->name,
-                    trim(($entry->teacher?->title ? $entry->teacher->title.' ' : '').($entry->teacher?->first_name ?? '').' '.($entry->teacher?->last_name ?? '')),
+                    $entry->subject?->name ?? $entry->custom_subject_name,
+                    implode(', ', $teacherNamesBySubject[$entry->subject_id] ?? $this->teacherNames($entry->teacher ? collect([$entry->teacher]) : collect())),
                     $entry->room?->name ?? '',
+                    $entry->note,
+                    $scheduleNote,
                 ], ';');
             }
 
@@ -235,13 +380,40 @@ class ScheduleController extends Controller
     }
 
     /**
+     * @param  Collection<int, TimetableEntry>  $entries
+     * @return array<int, array<int, string>>
+     */
+    private function teacherNamesBySubject(Collection $entries): array
+    {
+        return $entries->whereNotNull('subject_id')
+            ->groupBy('subject_id')
+            ->map(fn (Collection $subjectEntries): array => $this->teacherNames($subjectEntries->pluck('teacher')->filter()))
+            ->all();
+    }
+
+    /**
+     * @param  Collection<int, Teacher>  $teachers
+     * @return array<int, string>
+     */
+    private function teacherNames(Collection $teachers): array
+    {
+        return $teachers->unique('id')
+            ->map(fn (Teacher $teacher): string => trim(($teacher->title ? $teacher->title.' ' : '').$teacher->first_name.' '.$teacher->last_name))
+            ->values()
+            ->all();
+    }
+
+    /**
      * @return Collection<int, TimetableEntry>
      */
     private function entriesForGroup(StudentGroup $group, string $academicYear, string $semesterType): Collection
     {
         return TimetableEntry::query()
-            ->with(['subject', 'teacher', 'room'])
-            ->where('group_id', $group->id)
+            ->with(['subject', 'teacher', 'room', 'studentFlow'])
+            ->where(function ($query) use ($group): void {
+                $query->where('group_id', $group->id)
+                    ->orWhereHas('studentFlow.groups', fn ($groupsQuery) => $groupsQuery->whereKey($group->id));
+            })
             ->where('academic_year', $academicYear)
             ->where('semester_type', $semesterType)
             ->orderBy('cycle_week')
@@ -264,10 +436,11 @@ class ScheduleController extends Controller
      */
     private function compareSnapshots(array $before, array $after): array
     {
-        $beforeBySubjectWeek = collect($before)->keyBy(fn (array $entry): string => $entry['subject_id'].'-'.$entry['cycle_week']);
-        $afterBySubjectWeek = collect($after)->keyBy(fn (array $entry): string => $entry['subject_id'].'-'.$entry['cycle_week']);
+        $keyForEntry = fn (array $entry): string => 'entry-'.$entry['entry_id'];
+        $beforeBySubjectWeek = collect($before)->keyBy($keyForEntry);
+        $afterBySubjectWeek = collect($after)->keyBy($keyForEntry);
         $changes = ['added' => [], 'removed' => [], 'changed' => []];
-        $comparedFields = ['weekday_no', 'start_time', 'end_time', 'teacher_id', 'room_id'];
+        $comparedFields = ['weekday_no', 'start_time', 'end_time', 'teacher_id', 'room_id', 'custom_subject_name', 'note', 'duration_hours', 'coverage_type'];
 
         foreach ($afterBySubjectWeek as $key => $entry) {
             if (! $beforeBySubjectWeek->has($key)) {

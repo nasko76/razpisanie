@@ -15,6 +15,9 @@
 <body>
     <h1>{{ $group->specialty->name }} · {{ $group->course_year }} курс · {{ $group->group_name }}</h1>
     <p>{{ $academicYear }} · {{ $semesterType === 'winter' ? 'Зимен семестър' : 'Летен семестър' }} · Учебен план: {{ $group->curriculumVersion?->name ?? '—' }}</p>
+    @if($note)
+        <p style="margin-top:8px">{{ $note }}</p>
+    @endif
 
     <table>
         <thead>
@@ -32,11 +35,9 @@
                 <tr>
                     <td>{{ $weekdays[$entry->weekday_no] ?? $entry->weekday_no }}</td>
                     <td>{{ $entry->cycle_week }}</td>
-                    <td>{{ $entry->subject->name }}</td>
+                    <td>{{ $entry->subject?->name ?? $entry->custom_subject_name }} @if($entry->note)<br><small>{{ $entry->note }}</small>@endif</td>
                     <td>
-                        @if($entry->teacher)
-                            {{ $entry->teacher->first_name }} {{ $entry->teacher->last_name }}
-                        @endif
+                        {{ implode(', ', $teacherNamesBySubject[$entry->subject_id] ?? ($entry->teacher ? [trim(($entry->teacher->title ? $entry->teacher->title.' ' : '').$entry->teacher->first_name.' '.$entry->teacher->last_name)] : [])) }}
                     </td>
                     <td>
                         @if($entry->room)

@@ -4,6 +4,7 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class StudentGroup extends Model
@@ -31,5 +32,11 @@ class StudentGroup extends Model
     public function timetableEntries(): HasMany
     {
         return $this->hasMany(TimetableEntry::class, 'group_id');
+    }
+
+    public function studentFlows(): BelongsToMany
+    {
+        return $this->belongsToMany(StudentFlow::class, 'student_flow_group', 'student_group_id', 'student_flow_id')
+            ->withTimestamps();
     }
 }

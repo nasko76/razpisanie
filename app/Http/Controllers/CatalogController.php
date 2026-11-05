@@ -6,10 +6,13 @@ use App\Models\CurriculumSubject;
 use App\Models\CurriculumVersion;
 use App\Models\Room;
 use App\Models\Specialty;
+use App\Models\StudentFlow;
 use App\Models\StudentGroup;
 use App\Models\Subject;
 use App\Models\Teacher;
+use App\Models\TeacherAbsence;
 use App\Models\TeacherAssignment;
+use Carbon\CarbonImmutable;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -19,17 +22,22 @@ use Illuminate\View\View;
 
 class CatalogController extends Controller
 {
-    public function index(): View
+    public function index(Request $request): View
     {
+        $activeTab = $request->string('tab')->toString();
+        $activeTab = in_array($activeTab, ['plans', 'subjects', 'teachers', 'organization'], true)
+            ? $activeTab
+            : 'plans';
+
         return view('admin.catalog', [
             'specialties' => Specialty::query()->withCount('curriculumVersions')->orderBy('name')->get(),
             'curriculumVersions' => CurriculumVersion::query()->with('specialty')->withCount('subjects')->orderByDesc('version_year')->get(),
             'groups' => StudentGroup::query()->with(['specialty', 'curriculumVersion'])->orderBy('course_year')->orderBy('group_name')->get(),
             'subjects' => Subject::query()->withCount('curriculumSubjects')->orderBy('name')->get(),
-            'curriculumSubjects' => CurriculumSubject::query()->with(['curriculumVersion.specialty', 'subject'])->orderBy('course_year')->orderBy('semester_no')->get(),
-            'teachers' => Teacher::query()->withCount('assignments')->orderBy('last_name')->get(),
-            'assignments' => TeacherAssignment::query()->with(['teacher', 'subject', 'curriculumVersion.specialty'])->orderBy('course_year')->get(),
+            'teachers' => Teacher::query()->with('absences')->withCount('assignments')->orderBy('last_name')->get(),
             'rooms' => Room::query()->orderBy('name')->get(),
+            'studentFlows' => StudentFlow::query()->with(['groups.specialty'])->withCount('groups')->orderBy('name')->get(),
+            'activeTab' => $activeTab,
         ]);
     }
 
@@ -108,12 +116,85 @@ class CatalogController extends Controller
         return $this->saved($data['is_active'] ? 'Версията е активирана.' : 'Версията е архивирана.');
     }
 
+    public function updateCurriculumVersionDetails(Request $request, CurriculumVersion $curriculumVersion): RedirectResponse
+    {
+        $data = $request->validate([
+            'name' => ['required', 'string', 'max:255'],
+            'version_year' => ['required', 'integer', 'min:2000', 'max:2200'],
+            'active_from' => ['nullable', 'date'],
+            'active_to' => ['nullable', 'date', 'after_or_equal:active_from'],
+        ]);
+        $curriculumVersion->update($data);
+
+        return redirect()->route('catalog.curriculum-versions.show', $curriculumVersion)
+            ->with('status', 'Данните за учебния план са обновени.');
+    }
+
+    public function duplicateCurriculumVersion(CurriculumVersion $curriculumVersion): RedirectResponse
+    {
+        DB::transaction(function () use ($curriculumVersion): void {
+            $copy = $curriculumVersion->replicate();
+            $copy->name = $curriculumVersion->name.' — копие';
+            $copy->is_active = false;
+            $copy->save();
+            $copy->subjects()->createMany(
+                $curriculumVersion->subjects()->get()->map(fn (CurriculumSubject $subject): array => [
+                    'subject_id' => $subject->subject_id,
+                    'course_year' => $subject->course_year,
+                    'semester_no' => $subject->semester_no,
+                    'source_data' => $subject->source_data,
+                ])->all(),
+            );
+        });
+
+        return redirect()->route('catalog.index', ['tab' => 'plans'])
+            ->with('status', 'Копие на учебния план е създадено.');
+    }
+
+    public function storeCurriculumSubject(Request $request, CurriculumVersion $curriculumVersion): RedirectResponse
+    {
+        $data = $request->validate([
+            'subject_id' => ['required', 'integer', 'exists:subjects,id'],
+            'course_year' => ['required', 'integer', 'between:1,6'],
+            'semester_no' => ['required', 'integer', 'between:1,12'],
+        ]);
+        CurriculumSubject::query()->firstOrCreate([
+            'curriculum_version_id' => $curriculumVersion->id,
+            ...$data,
+        ]);
+
+        return redirect()->route('catalog.curriculum-versions.show', $curriculumVersion)
+            ->with('status', 'Дисциплината е добавена към учебния план.');
+    }
+
+    public function updateCurriculumSubject(Request $request, CurriculumSubject $curriculumSubject): RedirectResponse
+    {
+        $data = $request->validate([
+            'course_year' => ['required', 'integer', 'between:1,6'],
+            'semester_no' => ['required', 'integer', 'between:1,12'],
+        ]);
+        $curriculumSubject->update($data);
+
+        return redirect()->route('catalog.curriculum-versions.show', $curriculumSubject->curriculum_version_id)
+            ->with('status', 'Дисциплината е обновена в учебния план.');
+    }
+
+    public function destroyCurriculumSubject(CurriculumSubject $curriculumSubject): RedirectResponse
+    {
+        $versionId = $curriculumSubject->curriculum_version_id;
+        $curriculumSubject->delete();
+
+        return redirect()->route('catalog.curriculum-versions.show', $versionId)
+            ->with('status', 'Дисциплината е премахната от учебния план.');
+    }
+
     public function storeGroup(Request $request): RedirectResponse
     {
         $data = $request->validate([
             'specialty_id' => ['required', 'exists:specialties,id'],
             'curriculum_version_id' => [
-                'required',
+                'nullable',
+                'integer',
                 Rule::exists('curriculum_versions', 'id')->where('specialty_id', $request->input('specialty_id')),
             ],
             'course_year' => ['required', 'integer', 'between:1,6'],
@@ -123,7 +204,12 @@ class CatalogController extends Controller
 
         StudentGroup::query()->create($data);
 
-        return $this->saved('Групата е добавена и свързана с избраната версия на плана.');
+        return $this->saved(
+            isset($data['curriculum_version_id'])
+                ? 'Групата е добавена и свързана с избраната версия на плана.'
+                : 'Групата е добавена без учебен план за ръчно разписание.',
+            'organization',
+        );
     }
 
     public function updateGroup(Request $request, StudentGroup $group): RedirectResponse
@@ -135,7 +221,7 @@ class CatalogController extends Controller
 
         $group->update($data);
 
-        return $this->saved('Данните за групата са обновени.');
+        return $this->saved('Данните за групата са обновени.', 'organization');
     }
 
     public function storeSubject(Request $request): RedirectResponse
@@ -143,13 +229,16 @@ class CatalogController extends Controller
         $data = $request->validate([
             'code' => ['nullable', 'string', 'max:50'],
             'name' => ['required', 'string', 'max:255'],
-            'type' => ['required', Rule::in(['lecture', 'exercise', 'atelier', 'practice', 'selfstudy', 'stream_lecture'])],
-            'default_hours' => ['required', 'integer', 'min:0', 'max:40'],
+            'auditorium_hours' => ['required', 'integer', 'min:0', 'max:1000'],
+            'lecture_hours' => ['required', 'integer', 'min:0', 'max:1000'],
+            'exercise_hours' => ['required', 'integer', 'min:0', 'max:1000'],
+            'self_study_hours' => ['required', 'integer', 'min:0', 'max:1000'],
+            'control_type' => ['nullable', Rule::in(['И', 'ТО', 'П'])],
         ]);
 
         Subject::query()->create($data);
 
-        return $this->saved('Дисциплината е добавена.');
+        return $this->saved('Дисциплината е добавена.', 'subjects');
     }
 
     public function updateSubject(Request $request, Subject $subject): RedirectResponse
@@ -157,46 +246,16 @@ class CatalogController extends Controller
         $data = $request->validate([
             'code' => ['nullable', 'string', 'max:50'],
             'name' => ['required', 'string', 'max:255'],
-            'type' => ['required', Rule::in(['lecture', 'exercise', 'atelier', 'practice', 'selfstudy', 'stream_lecture'])],
-            'default_hours' => ['required', 'integer', 'min:0', 'max:40'],
+            'auditorium_hours' => ['required', 'integer', 'min:0', 'max:1000'],
+            'lecture_hours' => ['required', 'integer', 'min:0', 'max:1000'],
+            'exercise_hours' => ['required', 'integer', 'min:0', 'max:1000'],
+            'self_study_hours' => ['required', 'integer', 'min:0', 'max:1000'],
+            'control_type' => ['nullable', Rule::in(['И', 'ТО', 'П'])],
         ]);
 
         $subject->update($data);
 
-        return $this->saved('Дисциплината е обновена.');
-    }
-
-    public function storeCurriculumSubject(Request $request): RedirectResponse
-    {
-        $data = $request->validate([
-            'curriculum_version_id' => ['required', 'exists:curriculum_versions,id'],
-            'subject_id' => ['required', 'exists:subjects,id'],
-            'semester_no' => ['required', 'integer', 'between:1,12'],
-            'course_year' => ['required', 'integer', 'between:1,6'],
-            'contact_hours' => ['required', 'integer', 'min:0', 'max:1000'],
-            'self_study_hours' => ['required', 'integer', 'min:0', 'max:1000'],
-            'scheduled_hours' => ['required', 'integer', 'min:0', 'max:1000'],
-            'cycle_weeks' => ['required', 'regex:/^[1-3](,[1-3])*$/'],
-            'control_type' => ['nullable', 'string', 'max:100'],
-        ]);
-
-        $data['cycle_weeks'] = array_values(array_unique(array_map('intval', explode(',', $data['cycle_weeks']))));
-        $exists = CurriculumSubject::query()
-            ->where('curriculum_version_id', $data['curriculum_version_id'])
-            ->where('subject_id', $data['subject_id'])
-            ->where('semester_no', $data['semester_no'])
-            ->where('course_year', $data['course_year'])
-            ->exists();
-
-        if ($exists) {
-            return back()->withErrors([
-                'subject_id' => 'Тази дисциплина вече е добавена към курса и семестъра на версията.',
-            ])->withInput();
-        }
-
-        CurriculumSubject::query()->create($data);
-
-        return $this->saved('Дисциплината е добавена към учебния план.');
+        return $this->saved('Дисциплината е обновена.', 'subjects');
     }
 
     public function storeTeacher(Request $request): RedirectResponse
@@ -207,18 +266,14 @@ class CatalogController extends Controller
             'title' => ['nullable', 'string', 'max:100'],
             'max_daily_hours' => ['required', 'integer', 'between:1,16'],
             'weekly_workload_hours' => ['required', 'integer', 'between:0,80'],
-            'preferred_weekdays' => ['nullable', 'regex:/^[1-5](,[1-5])*$/'],
-            'unavailable_weekdays' => ['nullable', 'regex:/^[1-5](,[1-5])*$/'],
-            'unavailable_periods' => ['nullable', 'regex:/^[1-3]\/[1-5]\/(?:[01]\d|2[0-3]):[0-5]\d-(?:[01]\d|2[0-3]):[0-5]\d(?:;[1-3]\/[1-5]\/(?:[01]\d|2[0-3]):[0-5]\d-(?:[01]\d|2[0-3]):[0-5]\d)*$/'],
         ]);
 
-        $data['preferred_weekdays'] = $this->parseIntegerList($data['preferred_weekdays'] ?? null);
-        $data['unavailable_weekdays'] = $this->parseIntegerList($data['unavailable_weekdays'] ?? null);
-        $data['unavailable_periods'] = $this->parsePeriods($data['unavailable_periods'] ?? null);
         $data['active'] = true;
-        Teacher::query()->create($data);
+        $teacher = Teacher::query()->create($data);
 
-        return $this->saved('Преподавателят е добавен.');
+        return redirect()
+            ->route('catalog.teachers.show', $teacher)
+            ->with('status', 'Преподавателят е добавен.');
     }
 
     public function updateTeacher(Request $request, Teacher $teacher): RedirectResponse
@@ -229,18 +284,14 @@ class CatalogController extends Controller
             'title' => ['nullable', 'string', 'max:100'],
             'max_daily_hours' => ['required', 'integer', 'between:1,16'],
             'weekly_workload_hours' => ['required', 'integer', 'between:0,80'],
-            'preferred_weekdays' => ['nullable', 'regex:/^[1-5](,[1-5])*$/'],
-            'unavailable_weekdays' => ['nullable', 'regex:/^[1-5](,[1-5])*$/'],
-            'unavailable_periods' => ['nullable', 'regex:/^[1-3]\/[1-5]\/(?:[01]\d|2[0-3]):[0-5]\d-(?:[01]\d|2[0-3]):[0-5]\d(?:;[1-3]\/[1-5]\/(?:[01]\d|2[0-3]):[0-5]\d-(?:[01]\d|2[0-3]):[0-5]\d)*$/'],
             'active' => ['required', 'boolean'],
         ]);
 
-        $data['preferred_weekdays'] = $this->parseIntegerList($data['preferred_weekdays'] ?? null);
-        $data['unavailable_weekdays'] = $this->parseIntegerList($data['unavailable_weekdays'] ?? null);
-        $data['unavailable_periods'] = $this->parsePeriods($data['unavailable_periods'] ?? null);
         $teacher->update($data);
 
-        return $this->saved('Данните за преподавателя са обновени.');
+        return redirect()
+            ->route('catalog.teachers.show', $teacher)
+            ->with('status', 'Данните за преподавателя са обновени.');
     }
 
     public function storeTeacherAssignment(Request $request): RedirectResponse
@@ -251,11 +302,90 @@ class CatalogController extends Controller
             'curriculum_version_id' => ['required', 'exists:curriculum_versions,id'],
             'course_year' => ['required', 'integer', 'between:1,6'],
             'semester' => ['nullable', 'in:winter,summer'],
+            'coverage_type' => ['required', Rule::in(['lecture', 'exercise'])],
+            'student_flow_id' => ['nullable', 'integer', 'exists:student_flows,id'],
         ]);
+        if ($data['coverage_type'] !== 'lecture') {
+            $data['student_flow_id'] = null;
+        }
 
         TeacherAssignment::query()->firstOrCreate($data);
 
-        return $this->saved('Преподавателската обезпеченост е записана.');
+        return redirect()
+            ->route('catalog.teachers.show', $data['teacher_id'])
+            ->with('status', 'Преподавателската обезпеченост е записана.');
+    }
+
+    public function storeStudentFlow(Request $request): RedirectResponse
+    {
+        $data = $request->validate([
+            'name' => ['required', 'string', 'max:255', 'unique:student_flows,name'],
+            'student_group_ids' => ['required', 'array', 'min:2'],
+            'student_group_ids.*' => ['required', 'integer', 'distinct', 'exists:student_groups,id'],
+        ]);
+        $flow = DB::transaction(function () use ($data): StudentFlow {
+            $flow = StudentFlow::query()->create(['name' => $data['name']]);
+            $flow->groups()->sync($data['student_group_ids']);
+
+            return $flow;
+        });
+
+        return redirect()->route('catalog.index', ['tab' => 'organization'])
+            ->with('status', 'Учебният поток е създаден.');
+    }
+
+    public function updateStudentFlow(Request $request, StudentFlow $studentFlow): RedirectResponse
+    {
+        $data = $request->validate([
+            'name' => ['required', 'string', 'max:255', Rule::unique('student_flows', 'name')->ignore($studentFlow->id)],
+            'student_group_ids' => ['required', 'array', 'min:2'],
+            'student_group_ids.*' => ['required', 'integer', 'distinct', 'exists:student_groups,id'],
+        ]);
+        $studentFlow->update(['name' => $data['name']]);
+        $studentFlow->groups()->sync($data['student_group_ids']);
+
+        return redirect()->route('catalog.index', ['tab' => 'organization'])
+            ->with('status', 'Учебният поток е обновен.');
+    }
+
+    public function storeTeacherAbsence(Request $request, Teacher $teacher): RedirectResponse
+    {
+        $data = $request->validate([
+            'starts_on' => ['required', 'date_format:Y-m-d'],
+            'starts_time' => ['required', 'date_format:H:i'],
+            'ends_on' => ['required', 'date_format:Y-m-d'],
+            'ends_time' => ['required', 'date_format:H:i'],
+            'reason' => ['nullable', 'string', 'max:255'],
+        ]);
+        $startsAt = CarbonImmutable::parse($data['starts_on'].' '.$data['starts_time']);
+        $endsAt = CarbonImmutable::parse($data['ends_on'].' '.$data['ends_time']);
+
+        if ($endsAt->lessThanOrEqualTo($startsAt)) {
+            throw ValidationException::withMessages([
+                'ends_on' => 'Крайният момент трябва да е след началния.',
+            ]);
+        }
+
+        TeacherAbsence::query()->create([
+            'teacher_id' => $teacher->id,
+            'starts_at' => $startsAt,
+            'ends_at' => $endsAt,
+            'reason' => $data['reason'] ?? null,
+        ]);
+
+        return redirect()
+            ->route('catalog.teachers.show', $teacher)
+            ->with('status', 'Отсъствието е добавено.');
+    }
+
+    public function destroyTeacherAbsence(Teacher $teacher, TeacherAbsence $absence): RedirectResponse
+    {
+        abort_unless($absence->teacher_id === $teacher->id, 404);
+        $absence->delete();
+
+        return redirect()
+            ->route('catalog.teachers.show', $teacher)
+            ->with('status', 'Отсъствието е премахнато.');
     }
 
     public function storeRoom(Request $request): RedirectResponse
@@ -265,7 +395,7 @@ class CatalogController extends Controller
             'room_type' => ['required', Rule::in(['lecture', 'atelier', 'computer', 'painting', 'graphics', 'studio'])],
             'capacity' => ['required', 'integer', 'min:1', 'max:1000'],
             'equipment' => ['nullable', 'string', 'max:500'],
-            'unavailable_periods' => ['nullable', 'regex:/^[1-3]\/[1-5]\/(?:[01]\d|2[0-3]):[0-5]\d-(?:[01]\d|2[0-3]):[0-5]\d(?:;[1-3]\/[1-5]\/(?:[01]\d|2[0-3]):[0-5]\d-(?:[01]\d|2[0-3]):[0-5]\d)*$/'],
+            'unavailable_periods' => ['nullable', 'regex:/^[1-3]\/[1-7]\/(?:[01]\d|2[0-3]):[0-5]\d-(?:[01]\d|2[0-3]):[0-5]\d(?:;[1-3]\/[1-7]\/(?:[01]\d|2[0-3]):[0-5]\d-(?:[01]\d|2[0-3]):[0-5]\d)*$/'],
         ]);
 
         $data['equipment'] = $this->parseStringList($data['equipment'] ?? null);
@@ -273,7 +403,7 @@ class CatalogController extends Controller
         $data['is_active'] = true;
         Room::query()->create($data);
 
-        return $this->saved('Залата е добавена.');
+        return $this->saved('Залата е добавена.', 'organization');
     }
 
     public function updateRoom(Request $request, Room $room): RedirectResponse
@@ -283,7 +413,7 @@ class CatalogController extends Controller
             'room_type' => ['required', Rule::in(['lecture', 'atelier', 'computer', 'painting', 'graphics', 'studio'])],
             'capacity' => ['required', 'integer', 'min:1', 'max:1000'],
             'equipment' => ['nullable', 'string', 'max:500'],
-            'unavailable_periods' => ['nullable', 'regex:/^[1-3]\/[1-5]\/(?:[01]\d|2[0-3]):[0-5]\d-(?:[01]\d|2[0-3]):[0-5]\d(?:;[1-3]\/[1-5]\/(?:[01]\d|2[0-3]):[0-5]\d-(?:[01]\d|2[0-3]):[0-5]\d)*$/'],
+            'unavailable_periods' => ['nullable', 'regex:/^[1-3]\/[1-7]\/(?:[01]\d|2[0-3]):[0-5]\d-(?:[01]\d|2[0-3]):[0-5]\d(?:;[1-3]\/[1-7]\/(?:[01]\d|2[0-3]):[0-5]\d-(?:[01]\d|2[0-3]):[0-5]\d)*$/'],
             'is_active' => ['required', 'boolean'],
         ]);
 
@@ -291,24 +421,12 @@ class CatalogController extends Controller
         $data['unavailable_periods'] = $this->parsePeriods($data['unavailable_periods'] ?? null);
         $room->update($data);
 
-        return $this->saved('Данните за залата са обновени.');
+        return $this->saved('Данните за залата са обновени.', 'organization');
     }
 
-    private function saved(string $message): RedirectResponse
+    private function saved(string $message, string $tab = 'plans'): RedirectResponse
     {
-        return redirect()->route('catalog.index')->with('status', $message);
-    }
-
-    /**
-     * @return array<int, int>|null
-     */
-    private function parseIntegerList(?string $value): ?array
-    {
-        if ($value === null || trim($value) === '') {
-            return null;
-        }
-
-        return array_values(array_unique(array_map('intval', explode(',', $value))));
+        return redirect()->route('catalog.index', ['tab' => $tab])->with('status', $message);
     }
 
     /**

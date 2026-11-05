@@ -10,8 +10,12 @@ class TimetableEntry extends Model
     protected $fillable = [
         'group_id',
         'subject_id',
+        'student_flow_id',
         'teacher_id',
         'room_id',
+        'custom_subject_name',
+        'note',
+        'coverage_type',
         'academic_year',
         'semester_type',
         'cycle_week',
@@ -40,5 +44,10 @@ class TimetableEntry extends Model
     public function room(): BelongsTo
     {
         return $this->belongsTo(Room::class);
+    }
+
+    public function studentFlow(): BelongsTo
+    {
+        return $this->belongsTo(StudentFlow::class);
     }
 }

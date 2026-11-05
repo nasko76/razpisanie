@@ -220,16 +220,18 @@ it('previews and confirms curriculum rows while retaining source columns and mis
         'subject_id' => $subject->id,
         'semester_no' => 1,
         'course_year' => 1,
-        'contact_hours' => 60,
-        'self_study_hours' => 30,
-        'scheduled_hours' => 4,
-        'control_type' => 'Изпит',
     ]);
+    $subject->refresh();
+    expect($subject->auditorium_hours)->toBe(60)
+        ->and($subject->lecture_hours)->toBe(0)
+        ->and($subject->exercise_hours)->toBe(0)
+        ->and($subject->self_study_hours)->toBe(30)
+        ->and($subject->control_type)->toBe('И');
 
     $sourceData = $subject->curriculumSubjects()->firstOrFail()->source_data;
     expect($sourceData['columns']['Кредити'])->toBe('5')
         ->and($preview['rows'][0]['warnings'])->toContain(
-            'Типът на дисциплината липсва в източника; при създаване ще се използва системният тип „лекция“.',
+            'Часовете за лекции (Л) липсват в източника; стойността остава неизвестна.',
         );
 });
 
@@ -248,11 +250,24 @@ it('maps identified study-plan fields and preserves the remaining 24-column sour
     $row = $response->viewData('preview')['rows'][0];
     expect(count($row['source']))->toBe(24)
         ->and($row['contact_hours'])->toBe(48)
+        ->and($row['auditorium_hours'])->toBe(48)
+        ->and($row['lecture_hours'])->toBe(30)
+        ->and($row['exercise_hours'])->toBe(18)
         ->and($row['semester_no'])->toBe(3)
         ->and($row['source']['Л'])->toBe('30')
         ->and($row['source']['У'])->toBe('18')
         ->and($row['source']['Контролен семестър'])->toBe('4')
         ->and($row['source']['Кредити'])->toBe('6');
+
+    $this->post(route('imports.confirm'), [
+        'token' => $response->viewData('token'),
+        'subjects' => [0 => 'create'],
+    ])->assertRedirect(route('catalog.index'));
+
+    $subject = Subject::query()->firstOrFail();
+    expect($subject->auditorium_hours)->toBe(48)
+        ->and($subject->lecture_hours)->toBe(30)
+        ->and($subject->exercise_hours)->toBe(18);
 });
 
 it('discovers and imports the saved university plan table with abbreviated headers', function () {
@@ -287,9 +302,9 @@ it('discovers and imports the saved university plan table with abbreviated heade
         'curriculum_version_id' => $version->id,
         'semester_no' => 3,
         'course_year' => 2,
-        'contact_hours' => 48,
-        'control_type' => 'Изпит',
     ]);
+    expect(Subject::query()->firstOrFail()->auditorium_hours)->toBe(48)
+        ->and(Subject::query()->firstOrFail()->control_type)->toBe('И');
     $this->assertDatabaseCount('subjects', 1);
     $this->assertDatabaseCount('curriculum_subjects', 1);
 });
@@ -306,6 +321,7 @@ it('does not duplicate curriculum records when the same file is imported again',
     ])->assertRedirect();
 
     $subjectId = (string) Subject::query()->value('id');
+    Subject::query()->firstOrFail()->update(['control_type' => 'ТО']);
     $second = submitStudyImportPreview('curriculum', $version, curriculumHtml())->assertOk();
     expect($second->viewData('preview')['rows'][0]['status'])->toBe('already_imported');
     $this->post(route('imports.confirm'), [
@@ -315,6 +331,7 @@ it('does not duplicate curriculum records when the same file is imported again',
 
     $this->assertDatabaseCount('subjects', 1);
     $this->assertDatabaseCount('curriculum_subjects', 1);
+    expect(Subject::query()->firstOrFail()->control_type)->toBe('И');
 });
 
 it('shows ambiguous subject matches and imports only the explicitly selected record', function () {
@@ -322,14 +339,10 @@ it('shows ambiguous subject matches and imports only the explicitly selected rec
     $firstSubject = Subject::query()->create([
         'code' => 'ART-101',
         'name' => 'Рисуване',
-        'type' => 'atelier',
-        'default_hours' => 4,
     ]);
     Subject::query()->create([
         'code' => 'ART-201',
         'name' => 'Рисуване',
-        'type' => 'atelier',
-        'default_hours' => 4,
     ]);
     $admin = createStudyImportAdmin();
 
@@ -362,8 +375,6 @@ it('imports teacher coverage without storing the age column', function () {
     $subject = Subject::query()->create([
         'code' => 'ART-101',
         'name' => 'Рисуване',
-        'type' => 'atelier',
-        'default_hours' => 4,
     ]);
     $teacher = Teacher::query()->create([
         'first_name' => 'Иван',
@@ -395,11 +406,12 @@ it('imports teacher coverage without storing the age column', function () {
         'curriculum_version_id' => $version->id,
         'course_year' => 1,
         'semester' => 'winter',
-        'coverage_type' => 'Лекции',
+        'coverage_type' => 'lecture',
     ]);
 
     $source = $teacher->assignments()->firstOrFail()->source_data['columns'];
     expect($source)->toHaveKey('Катедра')
+        ->and($source['Статут на дисциплината / Вид заетост'])->toBe('Лекции')
         ->and($source)->not->toHaveKey('Възраст');
 
     $again = submitStudyImportPreview('teachers', $version, workloadHtml(), 'plan.xls')->assertOk();
@@ -438,11 +450,7 @@ it('defaults missing subject and teacher matches to create and imports them afte
         'last_name' => 'Иванов',
         'weekly_workload_hours' => 0,
     ]);
-    $this->assertDatabaseHas('subjects', [
-        'name' => 'Рисуване',
-        'type' => 'lecture',
-        'default_hours' => 0,
-    ]);
+    $this->assertDatabaseHas('subjects', ['name' => 'Рисуване']);
     $this->assertDatabaseCount('teacher_assignments', 1);
 });
 
