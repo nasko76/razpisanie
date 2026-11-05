@@ -45,7 +45,11 @@ return new class extends Migration
 
         if (Schema::hasTable('teacher_day_preferences')) {
             Schema::table('teacher_day_preferences', function (Blueprint $table): void {
-                $table->dropUnique(['teacher_id', 'weekday_no']);
+                $table->index('teacher_id', 'tdp_teacher_fk_idx');
+            });
+
+            Schema::table('teacher_day_preferences', function (Blueprint $table): void {
+                $table->dropUnique('teacher_day_preferences_teacher_id_weekday_no_unique');
                 $table->unsignedTinyInteger('cycle_week')->default(1);
             });
 
@@ -64,7 +68,11 @@ return new class extends Migration
             }
 
             Schema::table('teacher_day_preferences', function (Blueprint $table): void {
-                $table->unique(['teacher_id', 'cycle_week', 'weekday_no']);
+                $table->unique(['teacher_id', 'cycle_week', 'weekday_no'], 'tdp_teacher_week_day_unique');
+            });
+
+            Schema::table('teacher_day_preferences', function (Blueprint $table): void {
+                $table->dropIndex('tdp_teacher_fk_idx');
             });
         }
     }
@@ -77,9 +85,12 @@ return new class extends Migration
         if (Schema::hasTable('teacher_day_preferences')) {
             DB::table('teacher_day_preferences')->where('cycle_week', '!=', 1)->delete();
             Schema::table('teacher_day_preferences', function (Blueprint $table): void {
-                $table->dropUnique(['teacher_id', 'cycle_week', 'weekday_no']);
+                $table->unique(['teacher_id', 'weekday_no'], 'teacher_day_preferences_teacher_id_weekday_no_unique');
+            });
+
+            Schema::table('teacher_day_preferences', function (Blueprint $table): void {
+                $table->dropUnique('tdp_teacher_week_day_unique');
                 $table->dropColumn('cycle_week');
-                $table->unique(['teacher_id', 'weekday_no']);
             });
         }
 
