@@ -245,6 +245,31 @@
                     <label>Форма на контрол<select name="control_type"><option value="">Не е зададена</option><option value="И">Изпит (И)</option><option value="ТО">Текущ контрол (ТО)</option><option value="П">Продължаваща дисциплина (П)</option></select></label>
                     <button class="button primary span" type="submit">Добави дисциплина</button>
                 </form>
+                @php
+                    $subjectsWithSelfStudy = $subjects->filter(fn ($subject): bool => (int) $subject->self_study_hours > 0);
+                @endphp
+                <section class="item" aria-labelledby="self-study-report">
+                    <div class="row-head">
+                        <strong id="self-study-report">Справка: дисциплини със самоподготовка</strong>
+                        <span class="pill">{{ $subjectsWithSelfStudy->count() }}</span>
+                    </div>
+                    <div class="table-wrap">
+                        <table>
+                            <thead><tr><th>Код</th><th>Дисциплина</th><th>Самоподготовка</th></tr></thead>
+                            <tbody>
+                                @forelse($subjectsWithSelfStudy as $subject)
+                                    <tr>
+                                        <td>{{ $subject->code ?: '—' }}</td>
+                                        <td>{{ $subject->name }}</td>
+                                        <td>{{ $subject->self_study_hours }} ч.</td>
+                                    </tr>
+                                @empty
+                                    <tr><td colspan="3" class="empty">Няма дисциплини със зададени часове самоподготовка.</td></tr>
+                                @endforelse
+                            </tbody>
+                        </table>
+                    </div>
+                </section>
                 <div class="list">
                     @forelse($subjects as $subject)
                         <article class="item">
