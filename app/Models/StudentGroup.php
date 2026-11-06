@@ -34,9 +34,19 @@ class StudentGroup extends Model
         return $this->hasMany(TimetableEntry::class, 'group_id');
     }
 
+    public function teacherAssignments(): HasMany
+    {
+        return $this->hasMany(TeacherAssignment::class, 'student_group_id');
+    }
+
     public function studentFlows(): BelongsToMany
     {
         return $this->belongsToMany(StudentFlow::class, 'student_flow_group', 'student_group_id', 'student_flow_id')
             ->withTimestamps();
+    }
+
+    public function getDisplayNameAttribute(): string
+    {
+        return $this->course_year.' курс'.($this->group_name ? ' · група '.$this->group_name : '');
     }
 }

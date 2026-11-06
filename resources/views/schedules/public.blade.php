@@ -101,7 +101,7 @@
                     <select id="group_id" name="group_id">
                         <option value="">Целият курс</option>
                         @foreach($groups as $group)
-                            <option value="{{ $group->id }}" @selected($selectedGroup?->id === $group->id)>{{ $group->group_name }}</option>
+                            <option value="{{ $group->id }}" @selected($selectedGroup?->id === $group->id)>{{ $group->display_name }}</option>
                         @endforeach
                     </select>
                 </div>
@@ -130,7 +130,7 @@
                 @else
                     <header class="schedule-head">
                         <div>
-                            <h2>{{ $selectedGroup ? $selectedGroup->group_name : $selectedCourseYear.'. курс' }}</h2>
+                            <h2>{{ $selectedGroup ? $selectedGroup->display_name : $selectedCourseYear.'. курс' }}</h2>
                             <span class="muted">{{ $specialties->firstWhere('id', $selectedSpecialtyId)?->name }} · {{ $academicYear }} · {{ $semesterLabel }}</span>
                         </div>
                         <nav class="cycle" aria-label="Седмица от цикъла">
@@ -155,12 +155,13 @@
                                                         @php
                                                             $subjectTeacherNames = $teacherNamesBySubject[$entry->group_id.':'.$entry->subject_id] ?? [];
                                                             if ($subjectTeacherNames === [] && $entry->teacher) {
-                                                                $subjectTeacherNames[] = trim(($entry->teacher->title ? $entry->teacher->title.' ' : '').$entry->teacher->first_name.' '.$entry->teacher->last_name);
+                                                                $coverageLabel = $entry->coverage_type === 'lecture' ? 'Лекции: ' : ($entry->coverage_type === 'exercise' ? 'Упражнения: ' : '');
+                                                                $subjectTeacherNames[] = $coverageLabel.trim(($entry->teacher->title ? $entry->teacher->title.' ' : '').$entry->teacher->first_name.' '.$entry->teacher->last_name);
                                                             }
                                                         @endphp
                                                         <span class="lesson-meta">{{ substr($entry->start_time, 0, 5) }}–{{ substr($entry->end_time, 0, 5) }}@if($subjectTeacherNames !== []) · {{ implode(', ', $subjectTeacherNames) }}@endif @if($entry->room) · {{ $entry->room->name }}@endif</span>
                                                         @if($entry->studentFlow)<span class="lesson-meta">Общ поток: {{ $entry->studentFlow->name }}</span>@endif
-                                                        @if(!$selectedGroup)<span class="lesson-meta">{{ $entry->group?->group_name }}</span>@endif
+                                                        @if(!$selectedGroup)<span class="lesson-meta">{{ $entry->group?->display_name }}</span>@endif
                                                         @if($entry->note)<span class="lesson-meta">{{ $entry->note }}</span>@endif
                                                     </article>
                                                 @empty

@@ -6,7 +6,7 @@
             <div>
                 <h2 class="text-xl font-semibold leading-tight text-gray-800">История на разписанието</h2>
                 <p class="mt-1 text-sm text-gray-600">
-                    {{ $group->specialty->name }} · {{ $group->course_year }} курс, група {{ $group->group_name }}
+                    {{ $group->specialty->name }} · {{ $group->display_name }}
                     · {{ $academicYear }} · {{ $semesterType === 'winter' ? 'зимен' : 'летен' }} семестър
                 </p>
             </div>

@@ -36,7 +36,7 @@ class CatalogController extends Controller
             'subjects' => Subject::query()->withCount('curriculumSubjects')->orderBy('name')->get(),
             'teachers' => Teacher::query()->with('absences')->withCount('assignments')->orderBy('last_name')->get(),
             'rooms' => Room::query()->orderBy('name')->get(),
-            'studentFlows' => StudentFlow::query()->with(['groups.specialty'])->withCount('groups')->orderBy('name')->get(),
+            'studentFlows' => StudentFlow::query()->with(['groups.specialty', 'subject'])->withCount('groups')->orderBy('name')->get(),
             'activeTab' => $activeTab,
         ]);
     }
@@ -65,6 +65,14 @@ class CatalogController extends Controller
         $specialty->update($data);
 
         return $this->saved('Специалността е обновена.');
+    }
+
+    public function destroySpecialty(Specialty $specialty): RedirectResponse
+    {
+        $specialty->delete();
+        $this->deleteInvalidStudentFlows();
+
+        return $this->saved('Специалността и свързаните с нея планове и групи са изтрити.', 'plans');
     }
 
     public function storeCurriculumVersion(Request $request): RedirectResponse
@@ -128,6 +136,13 @@ class CatalogController extends Controller
 
         return redirect()->route('catalog.curriculum-versions.show', $curriculumVersion)
             ->with('status', 'Данните за учебния план са обновени.');
+    }
+
+    public function destroyCurriculumVersion(CurriculumVersion $curriculumVersion): RedirectResponse
+    {
+        $curriculumVersion->delete();
+
+        return $this->saved('Версията е изтрита; свързаните курсове остават без учебен план.', 'plans');
     }
 
     public function duplicateCurriculumVersion(CurriculumVersion $curriculumVersion): RedirectResponse
@@ -198,9 +213,10 @@ class CatalogController extends Controller
                 Rule::exists('curriculum_versions', 'id')->where('specialty_id', $request->input('specialty_id')),
             ],
             'course_year' => ['required', 'integer', 'between:1,6'],
-            'group_name' => ['required', 'string', 'max:100'],
+            'group_name' => ['nullable', 'string', 'max:100'],
             'student_count' => ['required', 'integer', 'min:1', 'max:500'],
         ]);
+        $data['group_name'] = filled($data['group_name'] ?? null) ? trim($data['group_name']) : null;
 
         StudentGroup::query()->create($data);
 
@@ -215,13 +231,22 @@ class CatalogController extends Controller
     public function updateGroup(Request $request, StudentGroup $group): RedirectResponse
     {
         $data = $request->validate([
-            'group_name' => ['required', 'string', 'max:100'],
+            'group_name' => ['nullable', 'string', 'max:100'],
             'student_count' => ['required', 'integer', 'min:1', 'max:500'],
         ]);
+        $data['group_name'] = filled($data['group_name'] ?? null) ? trim($data['group_name']) : null;
 
         $group->update($data);
 
         return $this->saved('Данните за групата са обновени.', 'organization');
+    }
+
+    public function destroyGroup(StudentGroup $group): RedirectResponse
+    {
+        $group->delete();
+        $this->deleteInvalidStudentFlows();
+
+        return $this->saved('Курсът и групата са изтрити заедно със свързаните занятия.', 'organization');
     }
 
     public function storeSubject(Request $request): RedirectResponse
@@ -256,6 +281,13 @@ class CatalogController extends Controller
         $subject->update($data);
 
         return $this->saved('Дисциплината е обновена.', 'subjects');
+    }
+
+    public function destroySubject(Subject $subject): RedirectResponse
+    {
+        $subject->delete();
+
+        return $this->saved('Дисциплината е изтрита заедно с включванията ѝ в планове и потоци.', 'subjects');
     }
 
     public function storeTeacher(Request $request): RedirectResponse
@@ -294,6 +326,13 @@ class CatalogController extends Controller
             ->with('status', 'Данните за преподавателя са обновени.');
     }
 
+    public function destroyTeacher(Teacher $teacher): RedirectResponse
+    {
+        $teacher->delete();
+
+        return $this->saved('Преподавателят е изтрит; часовете в разписанията са оставени без преподавател.', 'teachers');
+    }
+
     public function storeTeacherAssignment(Request $request): RedirectResponse
     {
         $data = $request->validate([
@@ -308,6 +347,14 @@ class CatalogController extends Controller
         if ($data['coverage_type'] !== 'lecture') {
             $data['student_flow_id'] = null;
         }
+        if (isset($data['student_flow_id'])) {
+            $this->assertFlowMatchesCurriculum(
+                StudentFlow::query()->findOrFail($data['student_flow_id']),
+                (int) $data['subject_id'],
+                (int) $data['curriculum_version_id'],
+                (int) $data['course_year'],
+            );
+        }
 
         TeacherAssignment::query()->firstOrCreate($data);
 
@@ -320,11 +367,17 @@ class CatalogController extends Controller
     {
         $data = $request->validate([
             'name' => ['required', 'string', 'max:255', 'unique:student_flows,name'],
+            'subject_id' => ['required', 'integer', 'exists:subjects,id'],
             'student_group_ids' => ['required', 'array', 'min:2'],
             'student_group_ids.*' => ['required', 'integer', 'distinct', 'exists:student_groups,id'],
         ]);
+        $this->assertFlowGroupsOfferSubject($data['student_group_ids'], (int) $data['subject_id']);
+
         $flow = DB::transaction(function () use ($data): StudentFlow {
-            $flow = StudentFlow::query()->create(['name' => $data['name']]);
+            $flow = StudentFlow::query()->create([
+                'name' => $data['name'],
+                'subject_id' => $data['subject_id'],
+            ]);
             $flow->groups()->sync($data['student_group_ids']);
 
             return $flow;
@@ -338,14 +391,84 @@ class CatalogController extends Controller
     {
         $data = $request->validate([
             'name' => ['required', 'string', 'max:255', Rule::unique('student_flows', 'name')->ignore($studentFlow->id)],
+            'subject_id' => ['required', 'integer', 'exists:subjects,id'],
             'student_group_ids' => ['required', 'array', 'min:2'],
             'student_group_ids.*' => ['required', 'integer', 'distinct', 'exists:student_groups,id'],
         ]);
-        $studentFlow->update(['name' => $data['name']]);
-        $studentFlow->groups()->sync($data['student_group_ids']);
+        $subjectId = (int) $data['subject_id'];
+        $this->assertFlowGroupsOfferSubject($data['student_group_ids'], $subjectId);
+        if (
+            $studentFlow->subject_id !== null
+            && $studentFlow->subject_id !== $subjectId
+            && ($studentFlow->timetableEntries()->exists() || $studentFlow->teacherAssignments()->exists())
+        ) {
+            throw ValidationException::withMessages([
+                'subject_id' => 'Не може да смените дисциплината на поток с вече назначени или планирани занятия.',
+            ]);
+        }
+        DB::transaction(function () use ($studentFlow, $data, $subjectId): void {
+            $studentFlow->update([
+                'name' => $data['name'],
+                'subject_id' => $subjectId,
+            ]);
+            $studentFlow->groups()->sync($data['student_group_ids']);
+        });
 
         return redirect()->route('catalog.index', ['tab' => 'organization'])
             ->with('status', 'Учебният поток е обновен.');
+    }
+
+    private function assertFlowMatchesCurriculum(
+        StudentFlow $flow,
+        int $subjectId,
+        int $curriculumVersionId,
+        int $courseYear,
+    ): void {
+        if (
+            (int) $flow->subject_id !== $subjectId
+            || ! $flow->groups()
+                ->where('student_groups.curriculum_version_id', $curriculumVersionId)
+                ->where('student_groups.course_year', $courseYear)
+                ->exists()
+        ) {
+            throw ValidationException::withMessages([
+                'student_flow_id' => 'Потокът трябва да е за същата дисциплина и да включва избрания курс.',
+            ]);
+        }
+    }
+
+    /**
+     * @param  array<int, int|string>  $groupIds
+     */
+    private function assertFlowGroupsOfferSubject(array $groupIds, int $subjectId): void
+    {
+        $eligibleGroupCount = StudentGroup::query()
+            ->whereIn('id', $groupIds)
+            ->whereNotNull('curriculum_version_id')
+            ->whereExists(function ($query) use ($subjectId): void {
+                $query->selectRaw('1')
+                    ->from('curriculum_subjects')
+                    ->whereColumn('curriculum_subjects.curriculum_version_id', 'student_groups.curriculum_version_id')
+                    ->whereColumn('curriculum_subjects.course_year', 'student_groups.course_year')
+                    ->where('curriculum_subjects.subject_id', $subjectId);
+            })
+            ->count();
+
+        if ($eligibleGroupCount !== count(array_unique($groupIds))) {
+            throw ValidationException::withMessages([
+                'student_group_ids' => 'Все групи в потока трябва да имат тази дисциплина в учебния си план.',
+            ]);
+        }
+    }
+
+    private function deleteInvalidStudentFlows(): void
+    {
+        StudentFlow::query()
+            ->where(function ($query): void {
+                $query->whereDoesntHave('groups')
+                    ->orWhereHas('groups', null, '<', 2);
+            })
+            ->delete();
     }
 
     public function storeTeacherAbsence(Request $request, Teacher $teacher): RedirectResponse

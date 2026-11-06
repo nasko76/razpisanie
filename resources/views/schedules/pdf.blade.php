@@ -13,7 +13,7 @@
     </style>
 </head>
 <body>
-    <h1>{{ $group->specialty->name }} · {{ $group->course_year }} курс · {{ $group->group_name }}</h1>
+    <h1>{{ $group->specialty->name }} · {{ $group->display_name }}</h1>
     <p>{{ $academicYear }} · {{ $semesterType === 'winter' ? 'Зимен семестър' : 'Летен семестър' }} · Учебен план: {{ $group->curriculumVersion?->name ?? '—' }}</p>
     @if($note)
         <p style="margin-top:8px">{{ $note }}</p>
@@ -37,7 +37,7 @@
                     <td>{{ $entry->cycle_week }}</td>
                     <td>{{ $entry->subject?->name ?? $entry->custom_subject_name }} @if($entry->note)<br><small>{{ $entry->note }}</small>@endif</td>
                     <td>
-                        {{ implode(', ', $teacherNamesBySubject[$entry->subject_id] ?? ($entry->teacher ? [trim(($entry->teacher->title ? $entry->teacher->title.' ' : '').$entry->teacher->first_name.' '.$entry->teacher->last_name)] : [])) }}
+                        {{ implode(', ', $teacherNamesBySubject[$entry->subject_id] ?? ($entry->teacher ? [($entry->coverage_type === 'lecture' ? 'Лекции: ' : ($entry->coverage_type === 'exercise' ? 'Упражнения: ' : '')).trim(($entry->teacher->title ? $entry->teacher->title.' ' : '').$entry->teacher->first_name.' '.$entry->teacher->last_name)] : [])) }}
                     </td>
                     <td>
                         @if($entry->room)

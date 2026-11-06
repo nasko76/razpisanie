@@ -14,7 +14,7 @@
     </style>
 </head>
 <body>
-    <h1>{{ $group->specialty->name }} - {{ $group->group_name }}</h1>
+    <h1>{{ $group->specialty->name }} - {{ $group->display_name }}</h1>
 
     <a href="{{ route('schedules.export-pdf', ['group_id' => $group->id]) }}">Експорт PDF</a>
 
@@ -37,7 +37,7 @@
                     <td>{{ $entry->cycle_week }}</td>
                     <td>{{ $entry->start_time }}</td>
                     <td>{{ $entry->end_time }}</td>
-                    <td>{{ $entry->subject->name }}</td>
+                    <td>{{ $entry->subject?->name ?? $entry->custom_subject_name }}</td>
                     <td>
                         @if($entry->teacher)
                             {{ $entry->teacher->first_name }} {{ $entry->teacher->last_name }}

@@ -9,7 +9,7 @@
         * { box-sizing:border-box; }
         body { margin:0; background:var(--canvas); color:var(--ink); font:14px/1.45 Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif; }
         a { color:inherit; text-decoration:none; }
-        .shell { max-width:1100px; margin:auto; padding:24px clamp(14px,3vw,40px) 48px; }
+        .shell { width:100%; max-width:1920px; margin:auto; padding:24px clamp(14px,3vw,48px) 48px; }
         .topbar,.heading,.row { display:flex; align-items:center; justify-content:space-between; gap:16px; }
         .topbar { margin-bottom:30px; color:var(--muted); font-size:13px; }
         .brand { display:flex; align-items:center; gap:10px; font-weight:750; }
@@ -184,7 +184,7 @@
                     <select name="student_flow_id">
                         <option value="">Не е обща лекция</option>
                         @foreach($studentFlows as $flow)
-                            <option value="{{ $flow->id }}">{{ $flow->name }} · {{ $flow->groups->count() }} групи</option>
+                            <option value="{{ $flow->id }}" data-subject="{{ $flow->subject_id }}">{{ $flow->subject?->name }} · {{ $flow->name }} · {{ $flow->groups->count() }} курса</option>
                         @endforeach
                     </select>
                 </label>
@@ -198,9 +198,9 @@
                     @forelse($assignments as $assignment)
                         <tr>
                             <td>{{ $assignment->subject?->name }}</td>
-                            <td>{{ $assignment->curriculumVersion?->specialty?->name }} · {{ $assignment->curriculumVersion?->name }}</td>
-                            <td>{{ $assignment->course_year }} курс · {{ $assignment->semester === 'summer' ? 'летен' : 'зимен' }}</td>
-                            <td>{{ $assignment->coverage_type === 'lecture' ? 'Лекции' : 'Упражнения' }}@if($assignment->studentFlow)<br><span class="muted">Общ поток: {{ $assignment->studentFlow->name }}</span>@endif</td>
+                            <td>{{ $assignment->curriculumVersion?->specialty?->name ?? $assignment->studentGroup?->specialty?->name }} · {{ $assignment->curriculumVersion?->name ?? 'Без избрана версия на план' }}</td>
+                            <td>{{ $assignment->course_year }} курс · {{ $assignment->semester === 'summer' ? 'летен' : 'зимен' }}@if($assignment->studentGroup)<br><span class="muted">Група {{ $assignment->studentGroup->group_name ?: 'обща' }}</span>@endif</td>
+                            <td>{{ $assignment->coverage_type === 'lecture' ? 'Лекции' : 'Упражнения' }}@if($assignment->studentFlow)<br><span class="muted">Общ поток: {{ $assignment->studentFlow->name }}</span>@endif @if($assignment->planned_hours !== null || $assignment->academic_year)<br><span class="muted">{{ $assignment->planned_hours ?? '—' }} ч. · {{ $assignment->academic_year }} · {{ $assignment->employment_category === 'honorary' ? 'хоноруван' : ($assignment->employment_category === 'full_time' ? 'щатен' : 'ръчен запис') }}</span>@endif</td>
                             <td>
                                 <form method="POST" action="{{ route('catalog.teacher-assignments.destroy', $assignment) }}" onsubmit="return confirm('Премахване на назначението?')">
                                     @csrf @method('DELETE')
@@ -229,6 +229,18 @@
     const coverageType = document.getElementById('coverage-type');
     const flowField = document.getElementById('flow-field');
     const flowSelect = flowField.querySelector('select');
+    const updateFlowSubjectOptions = () => {
+        const selectedSubject = subjectSelect.selectedOptions[0]?.dataset.subject ?? '';
+        for (const option of flowSelect.options) {
+            if (option.value !== '') {
+                option.hidden = option.dataset.subject !== selectedSubject;
+                if (option.hidden && option.selected) {
+                    flowSelect.value = '';
+                }
+            }
+        }
+    };
+    subjectSelect.addEventListener('change', updateFlowSubjectOptions);
     const updateFlowAvailability = () => {
         const isLecture = coverageType.value === 'lecture';
         flowSelect.disabled = !isLecture;
@@ -237,6 +249,7 @@
         }
     };
     coverageType.addEventListener('change', updateFlowAvailability);
+    updateFlowSubjectOptions();
     updateFlowAvailability();
 </script>
 </body>

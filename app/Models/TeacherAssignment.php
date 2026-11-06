@@ -15,6 +15,10 @@ class TeacherAssignment extends Model
         'semester',
         'coverage_type',
         'student_flow_id',
+        'student_group_id',
+        'academic_year',
+        'planned_hours',
+        'employment_category',
         'source_data',
     ];
 
@@ -43,5 +47,10 @@ class TeacherAssignment extends Model
     public function studentFlow(): BelongsTo
     {
         return $this->belongsTo(StudentFlow::class);
+    }
+
+    public function studentGroup(): BelongsTo
+    {
+        return $this->belongsTo(StudentGroup::class);
     }
 }

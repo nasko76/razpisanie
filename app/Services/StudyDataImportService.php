@@ -4,11 +4,14 @@ namespace App\Services;
 
 use App\Models\CurriculumSubject;
 use App\Models\CurriculumVersion;
+use App\Models\Specialty;
+use App\Models\StudentGroup;
 use App\Models\Subject;
 use App\Models\Teacher;
 use App\Models\TeacherAssignment;
 use DOMDocument;
 use DOMElement;
+use DOMNode;
 use DOMXPath;
 use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Support\Facades\DB;
@@ -17,20 +20,35 @@ use Illuminate\Validation\ValidationException;
 class StudyDataImportService
 {
     /**
-     * @return array{kind: string, version_id: int, version_name: string, specialty_name: string, rows: array<int, array<string, mixed>>}
+     * @return array{kind: string, version_id: int|null, version_name: string|null, specialty_name: string|null, employment_category: string|null, academic_year: string|null, rows: array<int, array<string, mixed>>}
      */
-    public function preview(string $kind, string $html, CurriculumVersion $version): array
-    {
+    public function preview(
+        string $kind,
+        string $html,
+        ?CurriculumVersion $version,
+        ?string $employmentCategory = null,
+        ?string $academicYear = null,
+    ): array {
         if (! in_array($kind, ['curriculum', 'teachers'], true)) {
             throw ValidationException::withMessages([
                 'kind' => 'Изберете учебен план или преподавателска обезпеченост.',
+            ]);
+        }
+        if ($kind === 'curriculum' && $version === null) {
+            throw ValidationException::withMessages([
+                'curriculum_version_id' => 'Изберете версия на учебния план.',
+            ]);
+        }
+        if ($kind === 'teachers' && (! in_array($employmentCategory, ['full_time', 'honorary'], true) || $academicYear === null)) {
+            throw ValidationException::withMessages([
+                'employment_category' => 'Изберете категория преподаватели и учебна година.',
             ]);
         }
 
         $tables = $this->parseTables($html);
         $rows = $kind === 'curriculum'
             ? $this->curriculumRows($tables, $version)
-            : $this->teacherRows($tables);
+            : $this->planAzTeacherRows($html, $tables, $employmentCategory, $academicYear);
 
         if ($rows === []) {
             throw ValidationException::withMessages([
@@ -40,9 +58,13 @@ class StudyDataImportService
 
         return [
             'kind' => $kind,
-            'version_id' => $version->id,
-            'version_name' => $version->name,
-            'specialty_name' => $version->specialty->name,
+            'version_id' => $version?->id,
+            'version_name' => $kind === 'curriculum'
+                ? $version?->name
+                : $academicYear.' · '.($employmentCategory === 'honorary' ? 'хонорувани' : 'щатни'),
+            'specialty_name' => $version?->specialty->name,
+            'employment_category' => $employmentCategory,
+            'academic_year' => $academicYear,
             'rows' => $rows,
         ];
     }
@@ -50,13 +72,16 @@ class StudyDataImportService
     /**
      * @param  array<string, mixed>  $preview
      * @param  array<string, mixed>  $resolutions
-     * @return array{created: int, skipped: int}
+     * @return array{created: int, updated: int, skipped: int}
      */
     public function confirm(array $preview, array $resolutions): array
     {
         return DB::transaction(function () use ($preview, $resolutions): array {
-            $version = CurriculumVersion::query()->findOrFail($preview['version_id']);
+            $version = $preview['kind'] === 'curriculum'
+                ? CurriculumVersion::query()->findOrFail($preview['version_id'])
+                : null;
             $created = 0;
+            $updated = 0;
             $skipped = 0;
             $createdSubjects = [];
             $createdTeachers = [];
@@ -119,28 +144,41 @@ class StudyDataImportService
 
                 $subject = $this->resolveSubject($subjectChoice, $row['subject_candidates'], $row, $createdSubjects);
                 $teacher = $this->resolveTeacher($teacherChoice, $row['teacher_candidates'], $row, $createdTeachers);
-                $assignment = TeacherAssignment::query()->firstOrCreate([
+                $specialty = $this->resolveSpecialty($row['specialty_name']);
+                $group = $this->resolveStudentGroup($specialty, $row);
+                $assignment = TeacherAssignment::query()->firstOrNew([
                     'teacher_id' => $teacher->id,
                     'subject_id' => $subject->id,
-                    'curriculum_version_id' => $version->id,
+                    'curriculum_version_id' => $group->curriculum_version_id,
+                    'student_group_id' => $group->id,
                     'course_year' => $row['course_year'],
                     'semester' => $row['semester_no'] % 2 === 1 ? 'winter' : 'summer',
-                    'coverage_type' => $row['coverage_type'] ?: null,
-                ], [
+                    'coverage_type' => $row['coverage_type'],
+                    'academic_year' => $preview['academic_year'],
+                    'employment_category' => $preview['employment_category'],
+                ]);
+                $wasExisting = $assignment->exists;
+                $assignment->fill([
+                    'planned_hours' => $row['planned_hours'],
                     'source_data' => [
                         'columns' => $row['source'],
                         'warnings' => $row['warnings'],
+                        'teacher_total_assigned_hours' => $row['teacher_total_assigned_hours'],
                     ],
                 ]);
 
-                if ($assignment->wasRecentlyCreated) {
+                if (! $wasExisting) {
+                    $assignment->save();
                     $created++;
+                } elseif ($assignment->isDirty()) {
+                    $assignment->save();
+                    $updated++;
                 } else {
                     $skipped++;
                 }
             }
 
-            return compact('created', 'skipped');
+            return compact('created', 'updated', 'skipped');
         });
     }
 
@@ -278,129 +316,335 @@ class StudyDataImportService
      * @param  array<int, array<int, array{text: string, header: bool, bold: bool}>>  $tables
      * @return array<int, array<string, mixed>>
      */
-    private function teacherRows(array $tables): array
-    {
-        $table = $this->findTeacherTable($tables);
-
-        if ($table === null) {
-            throw ValidationException::withMessages([
-                'file' => 'Не е намерена таблица за преподавателска обезпеченост (семестър, дисциплина/преподавател, вид и катедра).',
-            ]);
-        }
-
-        [$headers, $dataRows] = $this->tableHeadersAndRows($table);
-        $semesterIndex = $this->headerIndex($headers, fn (string $header): bool => str_contains($header, 'сем'));
-        $personIndex = $this->headerIndex($headers, fn (string $header): bool => str_contains($header, 'дисциплин') || str_contains($header, 'преподавател'));
-        $coverageIndex = $this->headerIndex($headers, fn (string $header): bool => str_contains($header, 'статут') || str_contains($header, 'вид') || str_contains($header, 'заетост'));
-        $departmentIndex = $this->headerIndex($headers, fn (string $header): bool => str_contains($header, 'катедр'));
-
-        if ($personIndex === null || $coverageIndex === null) {
-            throw ValidationException::withMessages([
-                'file' => 'Таблицата не съдържа разпознаваеми колони за дисциплина/преподавател и вид обезпеченост.',
-            ]);
-        }
-
+    private function planAzTeacherRows(
+        string $html,
+        array $tables,
+        string $employmentCategory,
+        string $academicYear,
+    ): array {
+        $contexts = $this->planAzTableContexts($html);
         $subjects = Subject::query()->get(['id', 'code', 'name']);
         $teachers = Teacher::query()->get(['id', 'first_name', 'last_name', 'title']);
-        $currentSubject = '';
-        $currentSemester = null;
         $result = [];
+        $foundPlanAzTable = false;
 
-        foreach ($dataRows as $cells) {
-            $name = $this->cell($cells, $personIndex);
-            $coverage = $this->cell($cells, $coverageIndex);
-            $coverageType = $this->normalizeCoverageType($coverage);
-            $rowSemester = $this->number($this->cell($cells, $semesterIndex));
+        foreach ($tables as $tableIndex => $table) {
+            [$headers, $dataRows] = $this->planAzTableHeadersAndRows($table);
+            $indexes = $this->planAzHeaderIndexes($headers);
 
-            if ($rowSemester !== null && $rowSemester >= 1 && $rowSemester <= 12) {
-                $currentSemester = $rowSemester;
-            }
-
-            if ($name === '') {
+            if ($indexes['subject'] === null
+                || $indexes['specialty'] === null
+                || $indexes['course_year'] === null
+                || $indexes['semester'] === null
+                || $indexes['group'] === null
+                || $indexes['coverage'] === null
+                || $indexes['planned_hours'] === null) {
                 continue;
             }
 
-            if ($this->subjectHeading($cells, $personIndex, $coverage)) {
-                $currentSubject = $name;
+            $foundPlanAzTable = true;
+            $context = $contexts[$tableIndex] ?? ['teacher_name' => '', 'total_assigned_hours' => null, 'header_text' => ''];
+            $teacherName = $context['teacher_name'];
+            $teacher = $this->splitTeacherName($teacherName);
+            $candidateTeachers = $teacher === null
+                ? []
+                : $this->findTeacherCandidates($teachers, $teacherName, $teacher);
 
-                continue;
-            }
+            foreach ($dataRows as $cells) {
+                $subjectName = $this->cell($cells, $indexes['subject']);
+                $specialtyName = $this->cleanSpecialtyName($this->cell($cells, $indexes['specialty']));
 
-            if ($currentSubject === '') {
-                continue;
-            }
+                if ($subjectName === '' || $specialtyName === '') {
+                    continue;
+                }
 
-            $semesterNo = $currentSemester;
-            $courseYear = $semesterNo === null ? null : (int) ceil($semesterNo / 2);
-            $person = $this->splitTeacherName($name);
-            $source = $this->sourceColumns($headers, $cells, true);
-            $warnings = [];
+                $courseYear = $this->planAzNumber($this->cell($cells, $indexes['course_year']));
+                $semesterNo = $this->planAzNumber($this->cell($cells, $indexes['semester']));
+                $groupName = $this->cleanGroupName($this->cell($cells, $indexes['group']));
+                $coverageLabel = $this->cell($cells, $indexes['coverage']);
+                $coverageType = $this->normalizeCoverageType($coverageLabel);
+                $plannedHours = $this->planAzNumber($this->cell($cells, $indexes['planned_hours']));
+                $studentCount = $this->planAzNumber($this->cell($cells, $indexes['student_count']));
+                $source = $this->sourceColumns($headers, $cells);
+                $warnings = [];
 
-            if ($semesterNo === null) {
-                $warnings[] = 'Не е разпознат семестър за назначението; редът не може да бъде записан.';
-            }
-            if ($person === null) {
-                $warnings[] = $this->normalize($name) === 'хоноруван'
-                    ? 'Източникът отбелязва „хоноруван“, но не посочва име на преподавател; назначението не може да бъде импортирано.'
-                    : 'Името на преподавателя не може да бъде разделено на име и фамилия.';
-            }
-            if ($person !== null && (mb_strlen($person['first_name']) > 100 || mb_strlen($person['last_name']) > 100 || mb_strlen($person['title'] ?? '') > 100)) {
-                $warnings[] = 'Името или академичната длъжност надвишава допустимата дължина.';
-            }
-            if (mb_strlen($name) > 255) {
-                $warnings[] = 'Изходното име надвишава допустимите 255 знака.';
-            }
-            if (mb_strlen($coverage) > 255) {
-                $warnings[] = 'Видът на обезпечеността надвишава допустимите 255 знака.';
-            }
+                if ($teacher === null) {
+                    $warnings[] = 'Не е разпознато името на преподавателя пред таблицата.';
+                } elseif (mb_strlen($teacher['first_name']) > 100
+                    || mb_strlen($teacher['last_name']) > 100
+                    || mb_strlen($teacher['title'] ?? '') > 100) {
+                    $warnings[] = 'Името или академичната длъжност надвишава допустимата дължина.';
+                }
+                if ($courseYear === null || $courseYear < 1 || $courseYear > 6) {
+                    $warnings[] = 'Не е разпознат валиден курс (1–6).';
+                }
+                if ($semesterNo === null || $semesterNo < 1 || $semesterNo > 12) {
+                    $warnings[] = 'Не е разпознат валиден семестър (1–12).';
+                }
+                if ($coverageType === null) {
+                    $warnings[] = 'Колоната „Л/У“ трябва да указва лекции или упражнения.';
+                }
+                if ($plannedHours === null) {
+                    $warnings[] = 'Не са разпознати планираните часове от колоната „Пл.ч.“.';
+                }
+                if ($studentCount === null && $indexes['student_count'] !== null) {
+                    $warnings[] = 'Броят на студентите не е разпознат; при създаване на групата ще бъде 0.';
+                }
+                if ($candidateTeachers === []) {
+                    $warnings[] = 'Преподавателят не е намерен и ще бъде създаден след потвърждение.';
+                }
 
-            $candidateSubjects = $this->findSubjectCandidates($subjects, '', $currentSubject);
-            $candidateTeachers = $person === null ? [] : $this->findTeacherCandidates($teachers, $name, $person);
+                $candidateSubjects = $this->findSubjectCandidates($subjects, '', $subjectName);
+                if ($candidateSubjects === []) {
+                    $warnings[] = 'Дисциплината не е намерена и ще бъде създадена след потвърждение.';
+                }
 
-            if ($candidateSubjects === []) {
-                $warnings[] = 'Дисциплината не е намерена; при създаване типът и часовете ще останат системни стойности, защото липсват в този източник.';
+                $subjectStatus = $this->candidateStatus($candidateSubjects);
+                $teacherStatus = $this->candidateStatus($candidateTeachers);
+                $result[] = [
+                    'source' => $source,
+                    'subject_name' => $subjectName,
+                    'subject_code' => '',
+                    'subject_candidates' => $candidateSubjects,
+                    'teacher_name' => $teacherName,
+                    'teacher_parts' => $teacher,
+                    'teacher_candidates' => $candidateTeachers,
+                    'specialty_name' => $specialtyName,
+                    'course_year' => $courseYear !== null && $courseYear >= 1 && $courseYear <= 6 ? $courseYear : null,
+                    'semester_no' => $semesterNo !== null && $semesterNo >= 1 && $semesterNo <= 12 ? $semesterNo : null,
+                    'group_name' => $groupName,
+                    'student_count' => $studentCount !== null && $studentCount <= 10000 ? $studentCount : 0,
+                    'coverage_type' => $coverageType,
+                    'coverage_label' => $coverageLabel,
+                    'planned_hours' => $plannedHours,
+                    'teacher_total_assigned_hours' => $context['total_assigned_hours'],
+                    'employment_category' => $employmentCategory,
+                    'academic_year' => $academicYear,
+                    'subject_status' => $subjectStatus,
+                    'teacher_status' => $teacherStatus,
+                    'status' => $subjectStatus === 'ambiguous' || $teacherStatus === 'ambiguous'
+                        ? 'ambiguous'
+                        : ($subjectStatus === 'matched' && $teacherStatus === 'matched' ? 'matched' : 'missing'),
+                    'valid' => $teacher !== null
+                        && mb_strlen($teacher['first_name']) <= 100
+                        && mb_strlen($teacher['last_name']) <= 100
+                        && mb_strlen($teacher['title'] ?? '') <= 100
+                        && $courseYear !== null && $courseYear >= 1 && $courseYear <= 6
+                        && $semesterNo !== null && $semesterNo >= 1 && $semesterNo <= 12
+                        && $coverageType !== null
+                        && $plannedHours !== null
+                        && mb_strlen($subjectName) <= 255
+                        && mb_strlen($specialtyName) <= 255
+                        && mb_strlen($teacherName) <= 255
+                        && mb_strlen($groupName ?? '') <= 255,
+                    'warnings' => $warnings,
+                ];
             }
-            if ($candidateTeachers === []) {
-                $warnings[] = 'Преподавателят не е намерен; дневната и седмичната натовареност липсват в източника и ще се използват системните стойности 8/0.';
-            }
-            if ($coverage === '') {
-                $warnings[] = 'Видът на обезпечеността липсва в източника.';
-            } elseif ($coverageType === null) {
-                $warnings[] = 'Видът на обезпечеността не е разпознат като лекции или упражнения; редът ще бъде запазен без типово покритие.';
-            }
-            $subjectStatus = $this->candidateStatus($candidateSubjects);
-            $teacherStatus = $this->candidateStatus($candidateTeachers);
+        }
 
-            $result[] = [
-                'source' => $source,
-                'subject_name' => $currentSubject,
-                'subject_code' => '',
-                'subject_candidates' => $candidateSubjects,
-                'teacher_name' => $name,
-                'teacher_parts' => $person,
-                'teacher_candidates' => $candidateTeachers,
-                'semester_no' => $semesterNo,
-                'course_year' => $courseYear,
-                'coverage_type' => $coverageType,
-                'coverage_label' => $coverage,
-                'department' => $this->cell($cells, $departmentIndex),
-                'status' => $subjectStatus === 'ambiguous' || $teacherStatus === 'ambiguous'
-                    ? 'ambiguous'
-                    : ($subjectStatus === 'matched' && $teacherStatus === 'matched' ? 'matched' : 'missing'),
-                'subject_status' => $subjectStatus,
-                'teacher_status' => $teacherStatus,
-                'valid' => $semesterNo !== null
-                    && $person !== null
-                    && mb_strlen($person['first_name']) <= 100
-                    && mb_strlen($person['last_name']) <= 100
-                    && mb_strlen($person['title'] ?? '') <= 100
-                    && mb_strlen($name) <= 255
-                    && mb_strlen($coverage) <= 255,
-                'warnings' => $warnings,
-            ];
+        if (! $foundPlanAzTable) {
+            throw ValidationException::withMessages([
+                'file' => 'Не е намерена таблица PlanAZ с колони за дисциплина, специалност, курс, семестър, група, Л/У и планирани часове (Пл.ч.).',
+            ]);
         }
 
         return $result;
+    }
+
+    /**
+     * @param  array<int, array<int, array{text: string, header: bool, bold: bool}>>  $table
+     * @return array{0: array<int, string>, 1: array<int, array<int, array{text: string, header: bool, bold: bool}>>}
+     */
+    private function planAzTableHeadersAndRows(array $table): array
+    {
+        [$headers, $rows] = $this->tableHeadersAndRows($table);
+        $indexes = $this->planAzHeaderIndexes($headers);
+
+        if ($indexes['subject'] !== null && $indexes['specialty'] !== null && $indexes['planned_hours'] !== null) {
+            return [$headers, $rows];
+        }
+
+        foreach ($table as $headerIndex => $row) {
+            $candidateHeaders = array_map(fn (array $cell): string => $cell['text'], $row);
+            $indexes = $this->planAzHeaderIndexes($candidateHeaders);
+            if ($indexes['subject'] === null || $indexes['specialty'] === null || $indexes['planned_hours'] === null) {
+                continue;
+            }
+
+            return [$candidateHeaders, array_slice($table, $headerIndex + 1)];
+        }
+
+        return [$headers, $rows];
+    }
+
+    /**
+     * @param  array<int, string>  $headers
+     * @return array<string, int|null>
+     */
+    private function planAzHeaderIndexes(array $headers): array
+    {
+        $indexes = [
+            'subject' => null,
+            'specialty' => null,
+            'course_year' => null,
+            'semester' => null,
+            'group' => null,
+            'coverage' => null,
+            'planned_hours' => null,
+            'student_count' => null,
+        ];
+
+        foreach ($headers as $index => $header) {
+            $normalized = trim($this->normalize($header));
+
+            if ($indexes['subject'] === null && (str_contains($normalized, 'дисциплин') || str_contains($normalized, 'предмет') || str_contains($normalized, 'наименование'))) {
+                $indexes['subject'] = $index;
+            } elseif ($indexes['specialty'] === null && str_contains($normalized, 'специалност')) {
+                $indexes['specialty'] = $index;
+            } elseif ($indexes['course_year'] === null && preg_match('/^курс(?:\s|$)/u', $normalized) === 1) {
+                $indexes['course_year'] = $index;
+            } elseif ($indexes['semester'] === null && str_contains($normalized, 'сем')) {
+                $indexes['semester'] = $index;
+            } elseif ($indexes['group'] === null && (in_array($normalized, ['гр', 'група'], true) || str_contains($normalized, 'група'))) {
+                $indexes['group'] = $index;
+            } elseif ($indexes['coverage'] === null && (
+                in_array($normalized, ['л у', 'л у занятие', 'л у вид'], true)
+                || str_contains($normalized, 'вид занят')
+                || str_contains($normalized, 'тип занят')
+            )) {
+                $indexes['coverage'] = $index;
+            } elseif ($indexes['planned_hours'] === null && (
+                in_array($normalized, ['пл ч', 'пл час', 'пл часове'], true)
+                || (str_contains($normalized, 'пл') && str_contains($normalized, 'час'))
+            )) {
+                $indexes['planned_hours'] = $index;
+            } elseif ($indexes['student_count'] === null && (
+                str_contains($normalized, 'брой студ')
+                || (str_starts_with($normalized, 'бр') && str_contains($normalized, 'студ'))
+                || str_contains($normalized, 'студенти')
+            )) {
+                $indexes['student_count'] = $index;
+            }
+        }
+
+        return $indexes;
+    }
+
+    /**
+     * @return array<int, array{teacher_name: string, total_assigned_hours: int|null, header_text: string}>
+     */
+    private function planAzTableContexts(string $html): array
+    {
+        $document = new DOMDocument;
+        $previous = libxml_use_internal_errors(true);
+        $loaded = $document->loadHTML('<?xml encoding="UTF-8">'.$html, LIBXML_NONET | LIBXML_NOERROR | LIBXML_NOWARNING);
+        libxml_clear_errors();
+        libxml_use_internal_errors($previous);
+
+        if (! $loaded) {
+            throw ValidationException::withMessages([
+                'file' => 'HTML файлът не може да бъде прочетен.',
+            ]);
+        }
+
+        $xpath = new DOMXPath($document);
+        $contexts = [];
+
+        foreach ($xpath->query('//table') ?: [] as $table) {
+            if (! $table instanceof DOMElement) {
+                continue;
+            }
+
+            $hasRows = false;
+            foreach ($xpath->query('.//tr', $table) ?: [] as $row) {
+                if (! $row instanceof DOMElement) {
+                    continue;
+                }
+
+                $nearestTable = $row->parentNode;
+                while ($nearestTable instanceof DOMElement && $nearestTable->tagName !== 'table') {
+                    $nearestTable = $nearestTable->parentNode;
+                }
+                if ($nearestTable === $table && ($xpath->query('./th|./td', $row)?->length ?? 0) > 0) {
+                    $hasRows = true;
+
+                    break;
+                }
+            }
+
+            if (! $hasRows) {
+                continue;
+            }
+
+            $preceding = $xpath->query(
+                'preceding::*[self::h1 or self::h2 or self::h3 or self::h4 or self::p or self::div or self::span or self::strong or self::b][normalize-space(.) != ""]',
+                $table,
+            );
+            $contextTexts = [];
+            $teacherName = '';
+
+            if ($preceding !== false) {
+                for ($index = $preceding->length - 1; $index >= max(0, $preceding->length - 8); $index--) {
+                    $node = $preceding->item($index);
+                    if (! $node instanceof DOMNode) {
+                        continue;
+                    }
+
+                    $ancestor = $node->parentNode;
+                    $insideTable = false;
+                    while ($ancestor instanceof DOMElement) {
+                        if ($ancestor->tagName === 'table') {
+                            $insideTable = true;
+
+                            break;
+                        }
+                        $ancestor = $ancestor->parentNode;
+                    }
+                    if ($insideTable || ($xpath->query('.//table', $node)?->length ?? 0) > 0) {
+                        continue;
+                    }
+
+                    $text = preg_replace('/\s+/u', ' ', trim($node->textContent)) ?? '';
+                    $text = $this->repairMojibake($text);
+                    if ($text === '') {
+                        continue;
+                    }
+
+                    $contextTexts[] = $text;
+                    if ($teacherName === '') {
+                        $teacherName = $this->teacherNameFromContext($text);
+                    }
+                }
+            }
+
+            $headerText = implode(' ', $contextTexts);
+            $totalAssignedHours = null;
+            if (preg_match('/възложен(?:и)?(?:\s+и\s+редуциран\w*)?[^0-9]{0,40}([0-9]{1,4})/iu', $headerText, $matches) === 1) {
+                $totalAssignedHours = (int) $matches[1];
+            }
+
+            $contexts[] = compact('teacherName', 'totalAssignedHours', 'headerText');
+        }
+
+        return array_map(fn (array $context): array => [
+            'teacher_name' => $context['teacherName'],
+            'total_assigned_hours' => $context['totalAssignedHours'],
+            'header_text' => $context['headerText'],
+        ], $contexts);
+    }
+
+    private function teacherNameFromContext(string $context): string
+    {
+        $context = preg_replace('/(?:задължителен\s+норматив|възложен(?:\s+и\s+редуциран)?|редуциран|общо|работно време|натовареност).*/iu', '', $context) ?? $context;
+        $context = preg_replace('/^(?:преподавател|име)\s*[:\-]\s*/iu', '', trim($context)) ?? trim($context);
+        $context = trim($context, " \t\n\r\0\x0B·-–—,:;.");
+        $normalized = $this->normalize($context);
+
+        if ($context === '' || preg_match('/щатни|хоноруван|преподавател|раздел|специалност|катедра/u', $normalized) === 1) {
+            return '';
+        }
+
+        return $this->splitTeacherName($context) === null ? '' : $context;
     }
 
     /**
@@ -421,40 +665,6 @@ class StudyDataImportService
         }
 
         return null;
-    }
-
-    /**
-     * @param  array<int, array<int, array{text: string, header: bool, bold: bool}>>  $tables
-     * @return array<int, array{text: string, header: bool, bold: bool}>|null
-     */
-    private function findTeacherTable(array $tables): ?array
-    {
-        foreach ($tables as $table) {
-            [$headers] = $this->tableHeadersAndRows($table);
-            $combined = $this->normalize(implode(' ', $headers));
-
-            if (count($headers) >= 4
-                && str_contains($combined, 'сем')
-                && (str_contains($combined, 'дисциплин') || str_contains($combined, 'преподавател'))
-                && (str_contains($combined, 'заетост') || str_contains($combined, 'статут') || str_contains($combined, 'вид'))) {
-                return $table;
-            }
-        }
-
-        return null;
-    }
-
-    /**
-     * @param  array<int, array{text: string, header: bool, bold: bool}>  $row
-     */
-    private function subjectHeading(array $row, int $personIndex, string $coverage): bool
-    {
-        $normalized = $this->normalize($coverage);
-        $hasStatus = preg_match('/задължител|избираем|факултатив|optional|elective/u', $normalized) === 1;
-        $isBold = (bool) ($row[$personIndex]['bold'] ?? false);
-        $hasTeacherKind = preg_match('/лекц|упражнен|практик|семинар/u', $normalized) === 1;
-
-        return $hasStatus || ($isBold && ! $hasTeacherKind);
     }
 
     /**
@@ -696,34 +906,15 @@ class StudyDataImportService
     }
 
     /**
-     * @param  callable(string): bool  $predicate
-     * @param  array<int, string>  $headers
-     */
-    private function headerIndex(array $headers, callable $predicate): ?int
-    {
-        foreach ($headers as $index => $header) {
-            if ($predicate($this->normalize($header))) {
-                return $index;
-            }
-        }
-
-        return null;
-    }
-
-    /**
      * @param  array<int, string>  $headers
      * @param  array<int, array{text: string, header: bool, bold: bool}>  $cells
      * @return array<string, string>
      */
-    private function sourceColumns(array $headers, array $cells, bool $omitAge = false): array
+    private function sourceColumns(array $headers, array $cells): array
     {
         $source = [];
 
         foreach ($headers as $index => $header) {
-            if ($omitAge && ($index === 4 || preg_match('/възраст|age/u', $this->normalize($header)) === 1)) {
-                continue;
-            }
-
             $label = trim($header) !== '' ? trim($header) : 'Колона '.($index + 1);
             if (array_key_exists($label, $source)) {
                 $label .= ' '.($index + 1);
@@ -755,6 +946,108 @@ class StudyDataImportService
         return $number >= 0 && $number <= 10000 && floor($number) === $number ? (int) $number : null;
     }
 
+    private function planAzNumber(string $value): ?int
+    {
+        $number = $this->number($value);
+        if ($number !== null) {
+            return $number;
+        }
+
+        if (preg_match('/\d{1,4}/u', $value, $matches) === 1) {
+            return (int) $matches[0];
+        }
+
+        $romanNumerals = [
+            'I' => 1, 'І' => 1,
+            'II' => 2, 'ІІ' => 2,
+            'III' => 3, 'ІІІ' => 3,
+            'IV' => 4, 'ІV' => 4,
+            'V' => 5,
+            'VI' => 6, 'VІ' => 6,
+            'VII' => 7, 'VІІ' => 7,
+            'VIII' => 8, 'VІІІ' => 8,
+            'IX' => 9, 'ІX' => 9,
+            'X' => 10, 'Х' => 10,
+            'XI' => 11, 'ХІ' => 11,
+            'XII' => 12, 'ХІІ' => 12,
+        ];
+
+        return $romanNumerals[mb_strtoupper(trim($value))] ?? null;
+    }
+
+    private function cleanSpecialtyName(string $name): string
+    {
+        $name = trim($this->repairMojibake(str_replace("\u{00A0}", ' ', $name)));
+
+        return trim(preg_replace('/\s*-\s*ССО\s*$/iu', '', $name) ?? $name);
+    }
+
+    private function cleanGroupName(string $name): ?string
+    {
+        $name = trim($this->repairMojibake(str_replace("\u{00A0}", ' ', $name)));
+        if ($name === '' || in_array($this->normalize($name), ['0', 'няма', 'обща', 'без група'], true)) {
+            return null;
+        }
+
+        $name = preg_replace('/^(?:гр\.?|група)\s*/iu', '', $name) ?? $name;
+
+        return trim($name, " \t\n\r\0\x0B-–—") ?: null;
+    }
+
+    private function resolveSpecialty(string $name): Specialty
+    {
+        $normalizedName = $this->normalize($name);
+        $specialty = Specialty::query()->get()->first(
+            fn (Specialty $specialty): bool => $this->normalize($this->cleanSpecialtyName($specialty->name)) === $normalizedName,
+        );
+
+        return $specialty ?? Specialty::query()->create(['name' => $name]);
+    }
+
+    /**
+     * @param  array<string, mixed>  $row
+     */
+    private function resolveStudentGroup(Specialty $specialty, array $row): StudentGroup
+    {
+        $curriculumVersion = $specialty->curriculumVersions()
+            ->where('is_active', true)
+            ->orderByDesc('version_year')
+            ->orderByDesc('id')
+            ->first();
+
+        $groupQuery = StudentGroup::query()
+            ->where('specialty_id', $specialty->id)
+            ->where('course_year', $row['course_year']);
+        if ($curriculumVersion === null) {
+            $groupQuery->whereNull('curriculum_version_id');
+        } else {
+            $groupQuery->where('curriculum_version_id', $curriculumVersion->id);
+        }
+        if ($row['group_name'] === null) {
+            $groupQuery->whereNull('group_name');
+        } else {
+            $groupQuery->where('group_name', $row['group_name']);
+        }
+
+        $group = $groupQuery->orderBy('id')->first();
+
+        if ($group === null) {
+            return StudentGroup::query()->create([
+                'specialty_id' => $specialty->id,
+                'curriculum_version_id' => $curriculumVersion?->id,
+                'course_year' => $row['course_year'],
+                'group_name' => $row['group_name'],
+                'student_count' => $row['student_count'],
+            ]);
+        }
+
+        if ($group->student_count === 0 && $row['student_count'] > 0) {
+            $group->update(['student_count' => $row['student_count']]);
+        }
+
+        return $group;
+    }
+
     private function normalizeControlType(?string $value): ?string
     {
         $normalized = $this->normalize($value ?? '');
@@ -763,21 +1056,6 @@ class StudyDataImportService
             str_contains($normalized, 'изпит') => 'И',
             str_contains($normalized, 'текущ') => 'ТО',
             str_contains($normalized, 'продължаващ') => 'П',
-            default => null,
-        };
-    }
-
-    private function sourceSubjectType(string $value): ?string
-    {
-        $value = $this->normalize($value);
-
-        return match (true) {
-            str_contains($value, 'практик') => 'practice',
-            str_contains($value, 'упражнен') => 'exercise',
-            str_contains($value, 'ателие'), str_contains($value, 'студио') => 'atelier',
-            str_contains($value, 'поточна лекц') => 'stream_lecture',
-            str_contains($value, 'самостоятел') => 'selfstudy',
-            str_contains($value, 'лекц') => 'lecture',
             default => null,
         };
     }
@@ -844,7 +1122,7 @@ class StudyDataImportService
         }
 
         return [
-            'first_name' => array_shift($parts),
+            'first_name' => implode(' ', array_slice($parts, 0, -1)),
             'last_name' => array_pop($parts),
             'title' => $title,
         ];
@@ -975,9 +1253,9 @@ class StudyDataImportService
 
     private function normalizeCoverageType(string $value): ?string
     {
-        return match ($this->normalize($value)) {
-            'лекции', 'лекция', 'lecture' => 'lecture',
-            'упражнения', 'упражнение', 'exercise' => 'exercise',
+        return match (true) {
+            in_array($this->normalize($value), ['л', 'лекции', 'лекция', 'lecture'], true) => 'lecture',
+            in_array($this->normalize($value), ['у', 'упр', 'упражнения', 'упражнение', 'exercise'], true) => 'exercise',
             default => null,
         };
     }

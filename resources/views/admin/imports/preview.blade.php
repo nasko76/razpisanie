@@ -43,11 +43,11 @@
         <header class="heading">
             <div>
                 <div class="eyebrow">Преглед · {{ $preview['kind'] === 'curriculum' ? 'Учебен план' : 'Преподавателска обезпеченост' }}</div>
-                <h1>{{ $preview['specialty_name'] }} · {{ $preview['version_name'] }}</h1>
+                <h1>{{ $preview['kind'] === 'curriculum' ? $preview['specialty_name'].' · '.$preview['version_name'] : $preview['version_name'] }}</h1>
                 <p>{{ count($preview['rows']) }} разпознати реда. Проверете предложенията и изберете изрично кои да се запишат.</p>
             </div>
         </header>
-        <div class="notice">Записът не обновява съществуващи данни. Неразпознатите полета се запазват като изходни данни; липсващите стойности са отбелязани. Повторно импортирани редове се пропускат.</div>
+        <div class="notice">Неразпознатите колони се запазват като изходни данни. При повторен импорт еднаквите възлагания не се дублират, а променените редове се обновяват.</div>
         @if($errors->any())
             <div class="notice">@foreach($errors->all() as $error)<div>{{ $error }}</div>@endforeach</div>
         @endif
@@ -70,7 +70,7 @@
                                 @if($isCurriculum)
                                     {{ $row['subject_code'] ?: 'Без код' }} · {{ $row['course_year'] ? $row['course_year'].' курс' : 'Курс неразпознат' }} · {{ $row['semester_no'] ? 'семестър '.$row['semester_no'] : 'Семестър неразпознат' }}
                                 @else
-                                    {{ $row['course_year'] ? $row['course_year'].' курс' : 'Курс неразпознат' }} · {{ $row['semester_no'] ? 'семестър '.$row['semester_no'] : 'Семестър неразпознат' }} · {{ $row['coverage_label'] ?: 'Вид обезпеченост не е указан' }}{{ $row['department'] ? ' · '.$row['department'] : '' }}
+                                    {{ $row['specialty_name'] }} · {{ $row['course_year'] ? $row['course_year'].' курс' : 'Курс неразпознат' }} · {{ $row['semester_no'] ? 'семестър '.$row['semester_no'] : 'Семестър неразпознат' }} · {{ $row['group_name'] ? 'група '.$row['group_name'] : 'без група' }} · {{ $row['coverage_label'] ?: 'Л/У неразпознато' }} · {{ $row['planned_hours'] ?? 'часове неразпознати' }} ч.
                                 @endif
                             </p>
                         </div>
@@ -79,6 +79,8 @@
 
                     @if($isCurriculum)
                         <p>АЗ: {{ $row['auditorium_hours'] ?? '—' }} · Л: {{ $row['lecture_hours'] ?? '—' }} · У: {{ $row['exercise_hours'] ?? '—' }} · Самоподготовка: {{ $row['self_study_hours'] ?? 0 }} · Контрол: {{ $row['normalized_control_type'] ?? '—' }}</p>
+                    @else
+                        <p>Студенти в групата: {{ $row['student_count'] }} · Планирани часове за преподавателя: {{ $row['planned_hours'] ?? '—' }} · Общо възложени часове: {{ $row['teacher_total_assigned_hours'] ?? '—' }}</p>
                     @endif
 
                     @if($row['warnings'])
