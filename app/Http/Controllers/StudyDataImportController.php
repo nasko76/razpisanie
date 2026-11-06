@@ -26,7 +26,9 @@ class StudyDataImportController extends Controller
     {
         $data = $request->validate([
             'kind' => ['required', 'in:curriculum,teachers'],
-            'curriculum_version_id' => ['required', 'exists:curriculum_versions,id'],
+            'curriculum_version_id' => ['required_if:kind,curriculum', 'nullable', 'exists:curriculum_versions,id'],
+            'employment_category' => ['required_if:kind,teachers', 'nullable', 'in:full_time,honorary'],
+            'academic_year' => ['required_if:kind,teachers', 'nullable', 'regex:/^\d{4}\/\d{4}$/'],
             'file' => ['required', 'file', 'max:20480'],
         ]);
 
@@ -34,14 +36,22 @@ class StudyDataImportController extends Controller
         $extension = strtolower($file->getClientOriginalExtension());
         $html = $file->getContent();
 
-        if (! in_array($extension, ['html', 'htm', 'xls'], true) || stripos($html, '<table') === false) {
+        if (! in_array($extension, ['html', 'htm'], true) || stripos($html, '<table') === false) {
             throw ValidationException::withMessages([
-                'file' => 'Поддържат се HTML/HTM файлове или Excel .xls, записан като HTML таблица. Бинарни .xls и .xlsx файлове не се поддържат.',
+                'file' => 'Поддържат се HTML/HTM експорти с таблици. Excel .xls/.xlsx файлове не се поддържат.',
             ]);
         }
 
-        $version = CurriculumVersion::query()->with('specialty')->findOrFail($data['curriculum_version_id']);
-        $preview = $importer->preview($data['kind'], $html, $version);
+        $version = isset($data['curriculum_version_id'])
+            ? CurriculumVersion::query()->with('specialty')->findOrFail($data['curriculum_version_id'])
+            : null;
+        $preview = $importer->preview(
+            $data['kind'],
+            $html,
+            $version,
+            $data['employment_category'] ?? null,
+            $data['academic_year'] ?? null,
+        );
         $token = (string) Str::uuid();
         $request->session()->put('study_data_imports.'.$token, $preview);
 
@@ -71,7 +81,7 @@ class StudyDataImportController extends Controller
 
         return redirect()->route('catalog.index')->with(
             'status',
-            "Импортът приключи: {$result['created']} добавени, {$result['skipped']} пропуснати (включително вече налични записи).",
+            "Импортът приключи: {$result['created']} добавени, {$result['updated']} обновени, {$result['skipped']} без промяна или пропуснати.",
         );
     }
 }

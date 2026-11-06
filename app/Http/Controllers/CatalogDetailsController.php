@@ -29,14 +29,15 @@ class CatalogDetailsController extends Controller
             ->orderBy('subject_id')
             ->get();
         $assignments = TeacherAssignment::query()
-            ->with('teacher')
-            ->where('curriculum_version_id', $curriculumVersion->id)
-            ->get()
-            ->groupBy(fn (TeacherAssignment $assignment): string => implode(':', [
-                $assignment->subject_id,
-                $assignment->course_year,
-                $assignment->semester,
-            ]));
+            ->with(['teacher', 'studentFlow.groups', 'studentFlow.subject'])
+            ->where(function ($query) use ($curriculumVersion): void {
+                $query->where('curriculum_version_id', $curriculumVersion->id)
+                    ->orWhereHas('studentGroup', fn ($groups) => $groups
+                        ->where('curriculum_version_id', $curriculumVersion->id))
+                    ->orWhereHas('studentFlow.groups', fn ($groups) => $groups
+                        ->where('curriculum_version_id', $curriculumVersion->id));
+            })
+            ->get();
         $subjects = Subject::query()->orderBy('name')->get();
 
         return view('admin.catalog.curriculum-version', compact(
@@ -51,7 +52,7 @@ class CatalogDetailsController extends Controller
     {
         $teacher->load(['dayPreferences', 'absences']);
         $assignments = TeacherAssignment::query()
-            ->with(['subject', 'curriculumVersion.specialty', 'studentFlow'])
+            ->with(['subject', 'curriculumVersion.specialty', 'studentFlow.subject', 'studentGroup.specialty'])
             ->where('teacher_id', $teacher->id)
             ->orderBy('course_year')
             ->orderBy('semester')
@@ -73,7 +74,7 @@ class CatalogDetailsController extends Controller
             ->orderBy('course_year')
             ->orderBy('semester_no')
             ->get();
-        $studentFlows = StudentFlow::query()->with('groups.specialty')->orderBy('name')->get();
+        $studentFlows = StudentFlow::query()->with(['groups.specialty', 'subject'])->whereNotNull('subject_id')->orderBy('name')->get();
 
         return view('admin.catalog.teacher', compact(
             'teacher',
@@ -93,5 +94,13 @@ class CatalogDetailsController extends Controller
         return redirect()
             ->route('catalog.teachers.show', $teacherId)
             ->with('status', 'Преподавателското назначение е премахнато.');
+    }
+
+    public function destroyStudentFlow(StudentFlow $studentFlow): RedirectResponse
+    {
+        $studentFlow->delete();
+
+        return redirect()->route('catalog.index', ['tab' => 'organization'])
+            ->with('status', 'Потокът е изтрит; общите занятия са оставени към групата, в която са създадени.');
     }
 }

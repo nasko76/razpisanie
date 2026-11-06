@@ -13,6 +13,7 @@ use App\Models\TeacherAssignment;
 use App\Models\TeacherDayPreference;
 use App\Models\TimetableEntry;
 use Carbon\CarbonImmutable;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
@@ -46,6 +47,47 @@ class ScheduleService
      */
     public function generateForGroup(StudentGroup $group, string $academicYear, string $semesterType): array
     {
+        $pairedGroups = $this->pairedGroupsFor($group);
+
+        if ($pairedGroups->count() !== 2) {
+            return $this->generateForGroupIndividually($group, $academicYear, $semesterType);
+        }
+
+        return DB::transaction(function () use ($pairedGroups, $academicYear, $semesterType): array {
+            $firstGroup = $pairedGroups->first();
+            $secondGroup = $pairedGroups->last();
+            $firstResult = $this->generateForGroupIndividually($firstGroup, $academicYear, $semesterType, false, null, true);
+            $secondResult = $this->generateForGroupIndividually($secondGroup, $academicYear, $semesterType, false, $firstGroup->id, true);
+
+            foreach ($pairedGroups as $pairedGroup) {
+                $this->recordRevision($pairedGroup, $academicYear, $semesterType, 'Автоматично генериране');
+            }
+
+            return [
+                'entries' => [...$firstResult['entries'], ...$secondResult['entries']],
+                'unscheduled' => [...$firstResult['unscheduled'], ...$secondResult['unscheduled']],
+                'warnings' => [...$firstResult['warnings'], ...$secondResult['warnings']],
+                'analysis' => [...$firstResult['analysis'], ...$secondResult['analysis']],
+            ];
+        });
+    }
+
+    /**
+     * @return array{
+     *     entries: array<int, TimetableEntry>,
+     *     unscheduled: array<int, array{subject: string, reason: string, suggestion: string}>,
+     *     warnings: array<int, array{subject: string, reason: string, suggestion: string}>,
+     *     analysis: array<int, array{subject: string, auditorium_hours: int, scheduled_hours: int, self_study_hours: int, cycle_week: int|null, period: string|null, weekdays: array<int, int>}>
+     * }
+     */
+    private function generateForGroupIndividually(
+        StudentGroup $group,
+        string $academicYear,
+        string $semesterType,
+        bool $recordRevision = true,
+        ?int $pairedGroupId = null,
+        bool $pairedRotation = false,
+    ): array {
         $semesterParity = $semesterType === 'winter' ? 1 : 0;
         $curriculumSubjects = CurriculumSubject::query()
             ->with('subject')
@@ -54,27 +96,36 @@ class ScheduleService
             ->whereRaw('semester_no % 2 = ?', [$semesterParity])
             ->orderBy('semester_no')
             ->get();
+        $curriculumSubjects = $curriculumSubjects
+            ->sortBy(fn (CurriculumSubject $curriculumSubject): array => [
+                $this->estimatedSessionCount($curriculumSubject->subject) === 5 ? 0 : 1,
+                -$this->estimatedSessionCount($curriculumSubject->subject),
+                $curriculumSubject->semester_no,
+            ])
+            ->values();
 
         $entries = [];
         $unscheduled = [];
         $warnings = [];
         $analysis = [];
+        $pairedPeriodIndex = 0;
 
-        DB::transaction(function () use ($group, $academicYear, $semesterType, $curriculumSubjects, &$entries, &$unscheduled, &$warnings, &$analysis): void {
+        DB::transaction(function () use ($group, $academicYear, $semesterType, $curriculumSubjects, $recordRevision, $pairedGroupId, $pairedRotation, &$pairedPeriodIndex, &$entries, &$unscheduled, &$warnings, &$analysis): void {
             TimetableEntry::query()
                 ->where('group_id', $group->id)
                 ->where('academic_year', $academicYear)
                 ->where('semester_type', $semesterType)
+                ->whereNull('student_flow_id')
                 ->where('locked', false)
                 ->delete();
 
             foreach ($curriculumSubjects as $curriculumSubject) {
                 $subject = $curriculumSubject->subject;
                 $auditoriumHours = (int) $subject->auditorium_hours;
-                $lessonParts = $this->lessonParts($subject, $group, $semesterType);
+                $lessonParts = $this->lessonParts($subject, $group, $semesterType, $academicYear);
                 $plannedHours = array_sum(array_column($lessonParts, 'hours'));
 
-                if ($auditoriumHours < 1 && $plannedHours < 1) {
+                if ($auditoriumHours < 1 && $plannedHours < 1 && (int) $subject->self_study_hours < 1) {
                     $unscheduled[] = [
                         'subject' => $subject->name,
                         'reason' => 'Не са зададени аудиторни часове, лекции или упражнения.',
@@ -91,6 +142,22 @@ class ScheduleService
                         'teacher' => null,
                         'student_flow_id' => null,
                     ];
+                }
+
+                $selfStudyHours = (int) $subject->self_study_hours;
+                if ($selfStudyHours > 0) {
+                    if ($lessonParts === []) {
+                        $lessonParts[] = [
+                            'coverage_type' => null,
+                            'hours' => $selfStudyHours,
+                            'teacher' => null,
+                            'student_flow_id' => null,
+                        ];
+                    } else {
+                        $hoursByPart = array_column($lessonParts, 'hours');
+                        $largestPart = array_search(max($hoursByPart), $hoursByPart, true);
+                        $lessonParts[$largestPart]['hours'] += $selfStudyHours;
+                    }
                 }
 
                 $lockedEntries = TimetableEntry::query()
@@ -133,14 +200,12 @@ class ScheduleService
 
                 $days = [];
                 $scheduledHours = 0;
-                $surplusHours = 0;
                 $subjectCycleWeek = null;
                 $lastScheduledDay = null;
                 $subjectTimeRange = null;
+                $unableToPlace = false;
                 foreach ($lessonParts as $part) {
                     $sessions = (int) ceil($part['hours'] / 20);
-                    $scheduledHours += $sessions * 4 * self::COURSE_LENGTH_WEEKS / self::CYCLE_LENGTH_WEEKS;
-                    $surplusHours += max(0, $sessions * 4 * self::COURSE_LENGTH_WEEKS / self::CYCLE_LENGTH_WEEKS - $part['hours']);
 
                     $alreadyScheduled = $part['student_flow_id'] === null ? 0 : TimetableEntry::query()
                         ->where('student_flow_id', $part['student_flow_id'])
@@ -150,33 +215,47 @@ class ScheduleService
                         ->count();
 
                     for ($session = $alreadyScheduled; $session < $sessions; $session++) {
-
                         $candidate = $this->generatedEntry($group, $subject, $part, $academicYear, $semesterType);
+                        $pairedEntry = $pairedGroupId === null
+                            ? null
+                            : $this->pairedEntryFor($candidate, $pairedGroupId, $academicYear, $semesterType, $session);
+                        $preferredPeriod = null;
+                        if ($pairedRotation && $pairedGroupId === null) {
+                            $preferredPeriod = $pairedPeriodIndex % 2 === 0 ? 'morning' : 'afternoon';
+                            $pairedPeriodIndex++;
+                        }
+                        $placement = $this->chooseTimeRange(
+                            $candidate,
+                            $subjectCycleWeek,
+                            $lastScheduledDay,
+                            $pairedEntry,
+                            $preferredPeriod,
+                        );
+                        $subjectCycleWeek ??= $placement['cycle_week'];
+                        $candidate->fill($placement);
+
                         if ($subjectTimeRange === null) {
-                            $placement = $this->chooseTimeRange($candidate, $subjectCycleWeek);
                             $subjectTimeRange = [
                                 'start_time' => $candidate->start_time,
                                 'end_time' => $candidate->end_time,
                                 'duration_hours' => $candidate->duration_hours,
                             ];
-                        } else {
-                            $candidate->fill($subjectTimeRange);
-                            $placement = $this->choosePlacement($candidate, $subjectCycleWeek, $lastScheduledDay);
                         }
-                        $subjectCycleWeek ??= $placement['cycle_week'];
                         $candidate->fill([
                             'cycle_week' => $placement['cycle_week'],
                             'weekday_no' => $placement['weekday_no'],
                             'room_id' => $this->availableRoom($subject, $group, $candidate, $placement),
                         ]);
-                        $slotConflicts = $this->conflicts($candidate);
+                        $slotConflicts = $this->conflicts($candidate, true);
                         if ($slotConflicts !== []) {
-                            $warnings[] = [
+                            $unscheduled[] = [
                                 'subject' => $subject->name,
-                                'reason' => implode(' ', $slotConflicts),
-                                'suggestion' => 'Проверете и преместете занятието от редакцията в разписанието.',
+                                'reason' => 'Не е намерен свободен блок без засичане: '.implode(' ', $slotConflicts),
+                                'suggestion' => 'Добавете занятието ръчно или освободете подходящ блок.',
                             ];
-                            $candidate->room_id = null;
+                            $unableToPlace = true;
+
+                            break;
                         }
                         if ($candidate->teacher_id === null) {
                             $warnings[] = [
@@ -196,17 +275,18 @@ class ScheduleService
                         $entries[] = $candidate;
                         $days[] = $candidate->weekday_no;
                         $lastScheduledDay = $candidate->weekday_no;
+                        $scheduledHours += $candidate->duration_hours * self::COURSE_LENGTH_WEEKS / self::CYCLE_LENGTH_WEEKS;
+                    }
+
+                    if ($unableToPlace) {
+                        break;
                     }
                 }
 
-                $effectiveSelfStudy = (int) $subject->self_study_hours + $surplusHours;
-                if ($surplusHours > 0) {
-                    $warnings[] = [
-                        'subject' => $subject->name,
-                        'reason' => 'Округлянето до цели занятия добавя '.$surplusHours.' ч. самоподготовка към зададените '.(int) $subject->self_study_hours.' ч.',
-                        'suggestion' => 'Проверете дали това разпределение отговаря на плана.',
-                    ];
-                }
+                $effectiveSelfStudy = $selfStudyHours + max(
+                    0,
+                    (int) $scheduledHours - max($auditoriumHours, $plannedHours) - $selfStudyHours,
+                );
 
                 $analysis[] = [
                     'subject' => $subject->name,
@@ -224,7 +304,9 @@ class ScheduleService
                 ];
             }
 
-            $this->recordRevision($group, $academicYear, $semesterType, 'Автоматично генериране');
+            if ($recordRevision) {
+                $this->recordRevision($group, $academicYear, $semesterType, 'Автоматично генериране');
+            }
         });
 
         if ($curriculumSubjects->isEmpty()) {
@@ -241,6 +323,50 @@ class ScheduleService
             'warnings' => $warnings,
             'analysis' => $analysis,
         ];
+    }
+
+    private function pairedGroupsFor(StudentGroup $group): Collection
+    {
+        if ($group->curriculum_version_id === null) {
+            return StudentGroup::query()->whereKey([])->get();
+        }
+
+        $groups = StudentGroup::query()
+            ->where('specialty_id', $group->specialty_id)
+            ->where('curriculum_version_id', $group->curriculum_version_id)
+            ->where('course_year', $group->course_year)
+            ->orderBy('group_name')
+            ->orderBy('id')
+            ->get();
+
+        return $groups->count() === 2 ? $groups : StudentGroup::query()->whereKey([])->get();
+    }
+
+    private function pairedEntryFor(
+        TimetableEntry $candidate,
+        int $pairedGroupId,
+        string $academicYear,
+        string $semesterType,
+        int $session,
+    ): ?TimetableEntry {
+        return TimetableEntry::query()
+            ->where('group_id', $pairedGroupId)
+            ->where('subject_id', $candidate->subject_id)
+            ->where('academic_year', $academicYear)
+            ->where('semester_type', $semesterType)
+            ->whereNull('student_flow_id')
+            ->when(
+                $candidate->coverage_type === null,
+                fn ($query) => $query->whereNull('coverage_type'),
+                fn ($query) => $query->where('coverage_type', $candidate->coverage_type),
+            )
+            ->where('locked', false)
+            ->orderBy('cycle_week')
+            ->orderBy('weekday_no')
+            ->orderBy('start_time')
+            ->orderBy('id')
+            ->offset($session)
+            ->first();
     }
 
     /**
@@ -295,12 +421,18 @@ class ScheduleService
             ->whereRaw('semester_no % 2 = ?', [$semesterParity])
             ->get();
 
+        $processedSubjectIds = [];
         foreach ($curriculumSubjects as $curriculumSubject) {
             $subject = $curriculumSubject->subject;
+            if (isset($processedSubjectIds[$subject->id])) {
+                continue;
+            }
+            $processedSubjectIds[$subject->id] = true;
+
             $subjectEntries = $entries->where('subject_id', $subject->id);
             $auditoriumHours = (int) $subject->auditorium_hours;
             $plannedHours = (int) $subject->lecture_hours + (int) $subject->exercise_hours;
-            $requiredHours = max($auditoriumHours, $plannedHours);
+            $requiredHours = max($auditoriumHours, $plannedHours) + (int) $subject->self_study_hours;
             $scheduledHours = $subjectEntries->sum('duration_hours') * self::COURSE_LENGTH_WEEKS / self::CYCLE_LENGTH_WEEKS;
 
             if ($requiredHours > 0 && $subjectEntries->isEmpty()) {
@@ -321,18 +453,58 @@ class ScheduleService
                 ];
             }
 
+            if ($scheduledHours > $requiredHours) {
+                $addedSelfStudyHours = (int) $scheduledHours - $requiredHours;
+                $subject->update([
+                    'self_study_hours' => (int) $subject->self_study_hours + $addedSelfStudyHours,
+                ]);
+                $warnings[] = [
+                    'subject' => $subject->name,
+                    'reason' => 'Към самоподготовката на дисциплината са добавени '.$addedSelfStudyHours.' ч.',
+                    'suggestion' => 'Промяната е записана в учебния каталог.',
+                ];
+                $requiredHours = (int) $scheduledHours;
+            }
+
             if ($scheduledHours < $requiredHours) {
                 $warnings[] = [
                     'subject' => $subject->name,
                     'reason' => 'Разпределени са '.$scheduledHours.' от '.$requiredHours.' планирани аудиторни часа.',
                     'suggestion' => 'Добавете '.($requiredHours - $scheduledHours).' часа към разписанието.',
                 ];
-            } elseif ($scheduledHours > $requiredHours) {
+            }
+        }
+
+        foreach ($entries->groupBy(fn (TimetableEntry $entry): string => $entry->cycle_week.'-'.$entry->weekday_no) as $dayEntries) {
+            $dailyHours = (int) $dayEntries->sum('duration_hours');
+            if ($dailyHours > 10) {
+                $firstEntry = $dayEntries->first();
                 $warnings[] = [
-                    'subject' => $subject->name,
-                    'reason' => 'Разпределението надвишава планираните аудиторни часове с '.($scheduledHours - $requiredHours).' часа.',
-                    'suggestion' => 'Проверете дали излишъкът следва да се отчете като самоподготовка.',
+                    'subject' => $group->group_name,
+                    'reason' => 'Групата има '.$dailyHours.' учебни часа в един ден от седмица '.$firstEntry->cycle_week.'.',
+                    'suggestion' => 'Преместете занятие така, че дневната натовареност на групата да не надвишава 10 часа.',
                 ];
+            }
+        }
+
+        $teacherIds = $entries->whereNotNull('teacher_id')->pluck('teacher_id')->unique();
+        $teacherScheduleEntries = TimetableEntry::query()
+            ->with('teacher')
+            ->whereIn('teacher_id', $teacherIds)
+            ->where('academic_year', $academicYear)
+            ->where('semester_type', $semesterType)
+            ->get();
+        foreach ($teacherScheduleEntries->groupBy('teacher_id') as $teacherEntries) {
+            foreach ($teacherEntries->groupBy(fn (TimetableEntry $entry): string => $entry->cycle_week.'-'.$entry->weekday_no) as $dayEntries) {
+                $dailyHours = (int) $dayEntries->sum('duration_hours');
+                if ($dailyHours > 10) {
+                    $teacher = $dayEntries->first()->teacher;
+                    $warnings[] = [
+                        'subject' => $teacher ? trim(($teacher->title ? $teacher->title.' ' : '').$teacher->first_name.' '.$teacher->last_name) : 'Преподавател',
+                        'reason' => 'Преподавателят има '.$dailyHours.' учебни часа в един ден от седмица '.$dayEntries->first()->cycle_week.'.',
+                        'suggestion' => 'Преместете занятие така, че дневната натовареност на преподавателя да не надвишава 10 часа.',
+                    ];
+                }
             }
         }
 
@@ -345,36 +517,70 @@ class ScheduleService
     /** @param array{cycle_week:int, weekday_no:int, start_time:string, end_time:string, duration_hours:int, teacher_id:int|null, room_id:int|null, locked:bool, custom_subject_name?:string|null, note?:string|null} $data */
     public function moveEntry(TimetableEntry $entry, array $data): TimetableEntry
     {
-        $candidate = clone $entry;
-        $changes = [
-            'teacher_id' => $data['teacher_id'],
-            'room_id' => $data['room_id'],
-            'cycle_week' => $data['cycle_week'],
-            'weekday_no' => $data['weekday_no'],
-            'start_time' => $data['start_time'],
-            'end_time' => $data['end_time'],
-            'duration_hours' => $data['duration_hours'],
-            'locked' => $data['locked'],
-        ];
-        foreach (['coverage_type', 'student_flow_id', 'custom_subject_name', 'note'] as $optionalField) {
-            if (array_key_exists($optionalField, $data)) {
-                $changes[$optionalField] = $data[$optionalField];
+        return DB::transaction(function () use ($entry, $data): TimetableEntry {
+            $candidate = clone $entry;
+            $previousTeacherId = $entry->teacher_id;
+            $previousCoverageType = $entry->coverage_type;
+            $changes = [
+                'teacher_id' => $data['teacher_id'],
+                'room_id' => $data['room_id'],
+                'cycle_week' => $data['cycle_week'],
+                'weekday_no' => $data['weekday_no'],
+                'start_time' => $data['start_time'],
+                'end_time' => $data['end_time'],
+                'duration_hours' => $data['duration_hours'],
+                'locked' => $data['locked'],
+            ];
+            foreach (['coverage_type', 'student_flow_id', 'custom_subject_name', 'note'] as $optionalField) {
+                if (array_key_exists($optionalField, $data)) {
+                    $changes[$optionalField] = $data[$optionalField];
+                }
             }
-        }
-        $candidate->fill($changes);
+            $candidate->fill($changes);
 
-        $this->assertNoConflicts($candidate);
+            $this->assertNoConflicts($candidate);
 
-        $entry->fill($candidate->getAttributes());
-        $entry->save();
-        $this->recordRevision(
-            $entry->group,
-            $entry->academic_year,
-            $entry->semester_type,
-            'Ръчна редакция',
-        );
+            $entry->fill($candidate->getAttributes());
+            $entry->save();
 
-        return $entry->refresh();
+            if (
+                $previousTeacherId !== $entry->teacher_id
+                && $previousCoverageType === $entry->coverage_type
+                && $entry->subject_id !== null
+                && in_array($entry->coverage_type, ['lecture', 'exercise'], true)
+            ) {
+                $relatedEntries = TimetableEntry::query()
+                    ->where('subject_id', $entry->subject_id)
+                    ->where('coverage_type', $entry->coverage_type)
+                    ->where('academic_year', $entry->academic_year)
+                    ->where('semester_type', $entry->semester_type)
+                    ->when(
+                        $entry->student_flow_id !== null,
+                        fn (Builder $query) => $query->where('student_flow_id', $entry->student_flow_id),
+                        fn (Builder $query) => $query->where('group_id', $entry->group_id)->whereNull('student_flow_id'),
+                    )
+                    ->whereKeyNot($entry->id)
+                    ->get();
+
+                foreach ($relatedEntries as $relatedEntry) {
+                    $relatedCandidate = clone $relatedEntry;
+                    $relatedCandidate->teacher_id = $entry->teacher_id;
+                    $this->assertNoConflicts($relatedCandidate);
+                    $relatedEntry->teacher_id = $entry->teacher_id;
+                    $relatedEntry->save();
+                }
+            }
+
+            $this->syncTeacherAssignment($entry, $previousTeacherId, $previousCoverageType);
+            $this->recordRevision(
+                $entry->group,
+                $entry->academic_year,
+                $entry->semester_type,
+                'Ръчна редакция',
+            );
+
+            return $entry->refresh();
+        });
     }
 
     /** @param array{group_id:int, subject_id:int|null, custom_subject_name:string|null, teacher_id:int|null, room_id:int|null, academic_year:string, semester_type:string, cycle_week:int, weekday_no:int, start_time:string, end_time:string, duration_hours:int, note:string|null} $data */
@@ -387,6 +593,7 @@ class ScheduleService
 
         $this->assertNoConflicts($entry);
         $entry->save();
+        $this->syncTeacherAssignment($entry, null);
         $this->recordRevision(
             $entry->group,
             $entry->academic_year,
@@ -395,6 +602,98 @@ class ScheduleService
         );
 
         return $entry->refresh();
+    }
+
+    private function syncTeacherAssignment(
+        TimetableEntry $entry,
+        ?int $previousTeacherId,
+        ?string $previousCoverageType = null,
+    ): void {
+        if ($entry->subject_id === null) {
+            return;
+        }
+
+        $group = StudentGroup::query()->find($entry->group_id);
+        if ($group === null) {
+            return;
+        }
+
+        if (
+            $previousTeacherId !== null
+            && in_array($previousCoverageType, ['lecture', 'exercise'], true)
+            && $previousCoverageType !== $entry->coverage_type
+        ) {
+            $this->teacherAssignmentsFor($entry, $group, $previousCoverageType)
+                ->where('teacher_id', $previousTeacherId)
+                ->delete();
+        }
+
+        if (! in_array($entry->coverage_type, ['lecture', 'exercise'], true)) {
+            return;
+        }
+
+        $assignments = $this->teacherAssignmentsFor($entry, $group, $entry->coverage_type);
+        if ($entry->teacher_id === null) {
+            if ($previousTeacherId !== null) {
+                $assignments->where('teacher_id', $previousTeacherId)->delete();
+            }
+
+            return;
+        }
+
+        $matchingAssignment = (clone $assignments)->where('teacher_id', $entry->teacher_id)->first();
+        if ($matchingAssignment !== null) {
+            (clone $assignments)
+                ->where('teacher_id', '!=', $entry->teacher_id)
+                ->delete();
+
+            return;
+        }
+
+        $previousAssignment = $previousTeacherId === null
+            ? null
+            : (clone $assignments)->where('teacher_id', $previousTeacherId)->first();
+        if ($previousAssignment !== null) {
+            $previousAssignment->update(['teacher_id' => $entry->teacher_id]);
+            (clone $assignments)
+                ->where('teacher_id', '!=', $entry->teacher_id)
+                ->delete();
+
+            return;
+        }
+
+        (clone $assignments)->delete();
+        TeacherAssignment::query()->create([
+            'teacher_id' => $entry->teacher_id,
+            'subject_id' => $entry->subject_id,
+            'curriculum_version_id' => $entry->student_flow_id === null ? $group->curriculum_version_id : null,
+            'course_year' => $group->course_year,
+            'semester' => $entry->semester_type,
+            'coverage_type' => $entry->coverage_type,
+            'student_flow_id' => $entry->student_flow_id,
+            'student_group_id' => $entry->student_flow_id === null ? $group->id : null,
+            'academic_year' => $entry->academic_year,
+        ]);
+    }
+
+    private function teacherAssignmentsFor(TimetableEntry $entry, StudentGroup $group, string $coverageType): Builder
+    {
+        $coverageAliases = $coverageType === 'lecture'
+            ? ['lecture', 'Лекции', 'лекции', 'Лекция', 'лекция']
+            : ['exercise', 'Упражнения', 'упражнения', 'Упражнение', 'упражнение'];
+
+        return TeacherAssignment::query()
+            ->where('subject_id', $entry->subject_id)
+            ->whereIn('coverage_type', $coverageAliases)
+            ->where('semester', $entry->semester_type)
+            ->where('academic_year', $entry->academic_year)
+            ->when(
+                $entry->student_flow_id !== null,
+                fn (Builder $query) => $query->where('student_flow_id', $entry->student_flow_id),
+                fn (Builder $query) => $query
+                    ->whereNull('student_flow_id')
+                    ->where('student_group_id', $group->id),
+            );
     }
 
     public function recordRevision(StudentGroup $group, string $academicYear, string $semesterType, string $reason): void
@@ -476,54 +775,188 @@ class ScheduleService
         ]);
     }
 
-    /**
-     * @return array{cycle_week:int, weekday_no:int}
-     */
-    private function chooseTimeRange(TimetableEntry $candidate, ?int $cycleWeek): array
+    private function estimatedSessionCount(Subject $subject): int
     {
-        $ranges = [
-            ['start_time' => '08:00:00', 'end_time' => '11:45:00'],
-            ['start_time' => '13:00:00', 'end_time' => '16:45:00'],
-            ['start_time' => '16:00:00', 'end_time' => '19:45:00'],
-        ];
-        $plans = [];
+        $parts = array_values(array_filter([
+            (int) $subject->lecture_hours,
+            (int) $subject->exercise_hours,
+        ], fn (int $hours): bool => $hours > 0));
+        $plannedHours = array_sum($parts);
+        $baseHours = max((int) $subject->auditorium_hours, $plannedHours);
 
-        foreach ($ranges as $sortOrder => $range) {
-            $candidate->fill($range);
-            $placement = $this->choosePlacement($candidate, $cycleWeek);
-            $candidate->fill($placement);
-            $plans[] = [
-                'placement' => $placement,
-                'conflicts' => count($this->conflicts($candidate)),
-                'sort_order' => $sortOrder,
-            ];
+        if ($baseHours > $plannedHours) {
+            $parts[] = $baseHours - $plannedHours;
         }
 
-        usort($plans, fn (array $first, array $second): int => [
-            $first['conflicts'],
-            $first['sort_order'],
-        ] <=> [
-            $second['conflicts'],
-            $second['sort_order'],
-        ]);
-        $candidate->fill($ranges[$plans[0]['sort_order']]);
-        $candidate->fill($plans[0]['placement']);
+        $selfStudyHours = (int) $subject->self_study_hours;
+        if ($selfStudyHours > 0) {
+            if ($parts === []) {
+                $parts[] = $selfStudyHours;
+            } else {
+                $largestPart = array_search(max($parts), $parts, true);
+                $parts[$largestPart] += $selfStudyHours;
+            }
+        }
 
-        return $plans[0]['placement'];
+        return array_sum(array_map(
+            fn (int $hours): int => (int) ceil($hours / 20),
+            $parts,
+        ));
     }
 
     /**
      * @return array{cycle_week:int, weekday_no:int}
      */
-    private function choosePlacement(TimetableEntry $candidate, ?int $cycleWeek = null, ?int $adjacentToDay = null): array
+    private function chooseTimeRange(
+        TimetableEntry $candidate,
+        ?int $cycleWeek,
+        ?int $adjacentToDay = null,
+        ?TimetableEntry $pairedEntry = null,
+        ?string $preferredPeriod = null,
+    ): array {
+        $ranges = [
+            ['start_time' => '08:00:00', 'end_time' => '11:45:00', 'weekdays' => [1, 2, 3, 4, 5]],
+            ['start_time' => '13:00:00', 'end_time' => '16:45:00', 'weekdays' => [1, 2, 3, 4, 5]],
+            ['start_time' => '08:00:00', 'end_time' => '11:45:00', 'weekdays' => [6]],
+            ['start_time' => '13:00:00', 'end_time' => '16:45:00', 'weekdays' => [6]],
+            ['start_time' => '17:00:00', 'end_time' => '20:45:00', 'weekdays' => [1, 2, 3, 4, 5]],
+            ['start_time' => '17:00:00', 'end_time' => '20:45:00', 'weekdays' => [6]],
+        ];
+        if ($preferredPeriod !== null) {
+            foreach ($ranges as $range) {
+                if ($this->timePeriod($range['start_time']) !== $preferredPeriod) {
+                    continue;
+                }
+
+                $candidate->fill($range);
+                $placement = $this->choosePlacement(
+                    $candidate,
+                    $cycleWeek,
+                    $adjacentToDay,
+                    $range['weekdays'],
+                    true,
+                );
+                $candidate->fill($placement);
+
+                if ($this->conflicts($candidate, true) === []) {
+                    return $placement;
+                }
+            }
+        }
+
+        if ($pairedEntry !== null) {
+            $pairedPeriod = $this->timePeriod($pairedEntry->start_time);
+            $oppositePeriod = match ($pairedPeriod) {
+                'morning' => 'afternoon',
+                'afternoon' => 'morning',
+                default => null,
+            };
+
+            if ($oppositePeriod !== null) {
+                foreach ($ranges as $range) {
+                    if ($this->timePeriod($range['start_time']) !== $oppositePeriod
+                        || ! in_array($pairedEntry->weekday_no, $range['weekdays'], true)) {
+                        continue;
+                    }
+
+                    $candidate->fill($range);
+                    $placement = $this->choosePlacement(
+                        $candidate,
+                        $pairedEntry->cycle_week,
+                        null,
+                        [$pairedEntry->weekday_no],
+                        true,
+                    );
+                    $candidate->fill($placement);
+
+                    if ($this->conflicts($candidate, true) === []) {
+                        return $placement;
+                    }
+                }
+            }
+        }
+
+        $plans = [];
+
+        foreach ($ranges as $blockPriority => $range) {
+            $candidate->fill($range);
+            $placement = $this->choosePlacement(
+                $candidate,
+                $cycleWeek,
+                $adjacentToDay,
+                $range['weekdays'],
+                true,
+            );
+            $candidate->fill($placement);
+            $plans[] = [
+                'placement' => $placement,
+                'conflicts' => count($this->conflicts($candidate, true)),
+                'block_priority' => $blockPriority,
+            ];
+        }
+
+        usort($plans, fn (array $first, array $second): int => [
+            $first['conflicts'],
+            $first['block_priority'],
+            $first['placement']['preference'],
+            $first['placement']['day_distance'],
+            $first['placement']['entries'],
+            $first['placement']['cycle_week'],
+            $first['placement']['weekday_no'],
+        ] <=> [
+            $second['conflicts'],
+            $second['block_priority'],
+            $second['placement']['preference'],
+            $second['placement']['day_distance'],
+            $second['placement']['entries'],
+            $second['placement']['cycle_week'],
+            $second['placement']['weekday_no'],
+        ]);
+        $candidate->fill($ranges[$plans[0]['block_priority']]);
+        $candidate->fill($plans[0]['placement']);
+
+        return $plans[0]['placement'];
+    }
+
+    private function timePeriod(string $time): string
     {
+        return match (true) {
+            $time < '12:00:00' => 'morning',
+            $time < '16:00:00' => 'afternoon',
+            default => 'evening',
+        };
+    }
+
+    /**
+     * @return array{cycle_week:int, weekday_no:int}
+     */
+    private function choosePlacement(
+        TimetableEntry $candidate,
+        ?int $cycleWeek = null,
+        ?int $adjacentToDay = null,
+        ?array $weekdays = null,
+        bool $allowUnavailableSaturday = false,
+    ): array {
         $options = [];
 
         foreach ($cycleWeek === null ? [1, 2, 3] : [$cycleWeek] as $candidateWeek) {
-            foreach (self::WEEKDAYS as $weekdayNo => $dayName) {
+            foreach ($weekdays ?? [1, 2, 3, 4, 5, 6] as $weekdayNo) {
                 $candidate->cycle_week = $candidateWeek;
                 $candidate->weekday_no = $weekdayNo;
-                $conflictCount = count($this->conflicts($candidate));
+                $conflictCount = count($this->conflicts($candidate, $allowUnavailableSaturday));
+                $sameSubjectDay = TimetableEntry::query()
+                    ->where('group_id', $candidate->group_id)
+                    ->where('subject_id', $candidate->subject_id)
+                    ->where('academic_year', $candidate->academic_year)
+                    ->where('semester_type', $candidate->semester_type)
+                    ->where('cycle_week', $candidateWeek)
+                    ->where('weekday_no', $weekdayNo)
+                    ->when(
+                        $candidate->student_flow_id === null,
+                        fn ($query) => $query->whereNull('student_flow_id'),
+                        fn ($query) => $query->where('student_flow_id', $candidate->student_flow_id),
+                    )
+                    ->exists();
                 $preference = $candidate->teacher_id
                     ? TeacherDayPreference::query()
                         ->where('teacher_id', $candidate->teacher_id)
@@ -535,6 +968,8 @@ class ScheduleService
                     'cycle_week' => $candidateWeek,
                     'weekday_no' => $weekdayNo,
                     'conflicts' => $conflictCount,
+                    'same_subject_day' => $sameSubjectDay ? 1 : 0,
+                    'day_priority' => $weekdayNo === 6 ? 1 : 0,
                     'preference' => $preference === 'preferred' ? 0 : ($preference === 'unavailable' ? 2 : 1),
                     'day_distance' => $adjacentToDay === null ? 0 : min(
                         abs($weekdayNo - $adjacentToDay),
@@ -553,6 +988,8 @@ class ScheduleService
 
         usort($options, fn (array $first, array $second): int => [
             $first['conflicts'],
+            $first['same_subject_day'],
+            $first['day_priority'],
             $first['day_distance'],
             $first['preference'],
             $first['entries'],
@@ -560,6 +997,8 @@ class ScheduleService
             $first['weekday_no'],
         ] <=> [
             $second['conflicts'],
+            $second['same_subject_day'],
+            $second['day_priority'],
             $second['day_distance'],
             $second['preference'],
             $second['entries'],
@@ -581,7 +1020,7 @@ class ScheduleService
         foreach ($this->roomsForSubject($subject, $group) as $room) {
             $candidate->room_id = $room->id;
 
-            if ($this->conflicts($candidate) === []) {
+            if ($this->conflicts($candidate, true) === []) {
                 return $room->id;
             }
         }
@@ -594,22 +1033,34 @@ class ScheduleService
         StudentGroup $group,
         string $semesterType,
         ?string $coverageType,
+        string $academicYear,
     ): ?TeacherAssignment {
         return TeacherAssignment::query()
             ->with('teacher')
             ->where('subject_id', $subject->id)
-            ->where(function ($query) use ($group): void {
+            ->where(function ($query) use ($group, $subject): void {
                 $query->where(function ($standard) use ($group): void {
                     $standard->whereNull('student_flow_id')
-                        ->where('curriculum_version_id', $group->curriculum_version_id)
-                        ->where('course_year', $group->course_year);
-                })->orWhere(function ($flow) use ($group): void {
+                        ->where(function ($scope) use ($group): void {
+                            $scope->where('student_group_id', $group->id)
+                                ->orWhere(function ($curriculum) use ($group): void {
+                                    $curriculum->whereNull('student_group_id')
+                                        ->where('curriculum_version_id', $group->curriculum_version_id)
+                                        ->where('course_year', $group->course_year);
+                                });
+                        });
+                })->orWhere(function ($flow) use ($group, $subject): void {
                     $flow->whereNotNull('student_flow_id')
-                        ->whereHas('studentFlow.groups', fn ($groups) => $groups->whereKey($group->id));
+                        ->whereHas('studentFlow', fn ($studentFlow) => $studentFlow
+                            ->where('subject_id', $subject->id)
+                            ->whereHas('groups', fn ($groups) => $groups->whereKey($group->id)));
                 });
             })
             ->where(function ($query) use ($semesterType): void {
                 $query->whereNull('semester')->orWhere('semester', $semesterType);
+            })
+            ->where(function ($query) use ($academicYear): void {
+                $query->whereNull('academic_year')->orWhere('academic_year', $academicYear);
             })
             ->when(
                 $coverageType === null,
@@ -619,6 +1070,8 @@ class ScheduleService
                     : ['exercise', 'Упражнения', 'упражнения', 'Упражнение', 'упражнение']),
             )
             ->when($coverageType !== 'lecture', fn ($query) => $query->whereNull('student_flow_id'))
+            ->orderByRaw('CASE WHEN student_group_id = ? THEN 0 ELSE 1 END', [$group->id])
+            ->orderByRaw('CASE WHEN academic_year = ? THEN 0 ELSE 1 END', [$academicYear])
             ->orderByRaw('CASE WHEN student_flow_id IS NULL THEN 1 ELSE 0 END')
             ->whereHas('teacher', fn ($query) => $query->where('active', true))
             ->first();
@@ -631,6 +1084,7 @@ class ScheduleService
         Subject $subject,
         StudentGroup $group,
         string $semesterType,
+        string $academicYear,
     ): array {
         $parts = [];
 
@@ -642,7 +1096,7 @@ class ScheduleService
                 $parts[] = [
                     'coverage_type' => $coverageType,
                     'hours' => $hours,
-                    'teacher' => ($assignment = $this->findAssignmentForSubject($subject, $group, $semesterType, $coverageType))?->teacher,
+                    'teacher' => ($assignment = $this->findAssignmentForSubject($subject, $group, $semesterType, $coverageType, $academicYear))?->teacher,
                     'student_flow_id' => $coverageType === 'lecture' ? $assignment?->student_flow_id : null,
                 ];
             }
@@ -669,7 +1123,7 @@ class ScheduleService
     /**
      * @return array<int, string>
      */
-    private function conflicts(TimetableEntry $candidate): array
+    private function conflicts(TimetableEntry $candidate, bool $allowUnavailableSaturday = false): array
     {
         $conflicts = [];
         $scope = fn ($query) => $query
@@ -684,7 +1138,13 @@ class ScheduleService
         $groupIds = $candidate->student_flow_id
             ? StudentFlow::query()->find($candidate->student_flow_id)?->groups()->pluck('student_groups.id')->push($candidate->group_id)->unique()
             : collect([$candidate->group_id]);
-        if (TimetableEntry::query()->whereIn('group_id', $groupIds)->where($scope)->exists()) {
+        if (TimetableEntry::query()
+            ->where($scope)
+            ->where(function ($query) use ($groupIds): void {
+                $query->whereIn('group_id', $groupIds)
+                    ->orWhereHas('studentFlow.groups', fn ($groupsQuery) => $groupsQuery->whereIn('student_groups.id', $groupIds));
+            })
+            ->exists()) {
             $conflicts[] = 'Групата вече има занятие в този час.';
         }
 
@@ -724,7 +1184,10 @@ class ScheduleService
                     $conflicts[] = 'Седмичната натовареност на преподавателя ще бъде надвишена.';
                 }
 
-                if ($this->hasUnavailablePreference($teacher->id, $candidate)) {
+                if (
+                    $this->hasUnavailablePreference($teacher->id, $candidate)
+                    && ! ($allowUnavailableSaturday && $candidate->weekday_no === 6)
+                ) {
                     $conflicts[] = 'Преподавателят е отбелязал този ден като нежелан.';
                 }
 

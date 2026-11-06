@@ -111,6 +111,6 @@ it('shows both distinct teachers for a subject in the public schedule', function
         'group_id' => $group->id,
     ]))
         ->assertOk()
-        ->assertSee('Иван Иванов, Мария Петрова')
-        ->assertDontSee('Иван Иванов, Иван Иванов');
+        ->assertSee('Лекции: Иван Иванов, Упражнения: Мария Петрова')
+        ->assertDontSee('Лекции: Иван Иванов, Упражнения: Иван Иванов');
 });

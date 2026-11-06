@@ -58,7 +58,7 @@ class PublicScheduleController extends Controller
         $groups = $groupsQuery->get();
         $groupOptions = $groups->map(fn (StudentGroup $group): array => [
             'id' => $group->id,
-            'group_name' => $group->group_name,
+            'group_name' => $group->display_name,
             'specialty_id' => $group->specialty_id,
             'course_year' => $group->course_year,
         ])->values()->all();
@@ -101,10 +101,22 @@ class PublicScheduleController extends Controller
         }
         $teacherNamesBySubject = $entries->whereNotNull('subject_id')
             ->groupBy(fn (TimetableEntry $entry): string => $entry->group_id.':'.$entry->subject_id)
-            ->map(fn (Collection $subjectEntries): array => $subjectEntries->pluck('teacher')
-                ->filter()
-                ->unique('id')
-                ->map(fn (Teacher $teacher): string => trim(($teacher->title ? $teacher->title.' ' : '').$teacher->first_name.' '.$teacher->last_name))
+            ->map(fn (Collection $subjectEntries): array => $subjectEntries
+                ->groupBy(fn (TimetableEntry $entry): string => $entry->coverage_type ?? '')
+                ->flatMap(function (Collection $componentEntries, string $coverageType): array {
+                    $prefix = match ($coverageType) {
+                        'lecture' => 'Лекции: ',
+                        'exercise' => 'Упражнения: ',
+                        default => '',
+                    };
+
+                    return $componentEntries->pluck('teacher')
+                        ->filter()
+                        ->unique('id')
+                        ->map(fn (Teacher $teacher): string => $prefix.trim(($teacher->title ? $teacher->title.' ' : '').$teacher->first_name.' '.$teacher->last_name))
+                        ->all();
+                })
+                ->unique()
                 ->values()
                 ->all())
             ->all();

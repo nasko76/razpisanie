@@ -87,7 +87,7 @@ class ScheduleController extends Controller
             'entries' => $entries,
             'teachers' => Teacher::query()->where('active', true)->orderBy('last_name')->get(),
             'rooms' => Room::query()->where('is_active', true)->orderBy('name')->get(),
-            'studentFlows' => StudentFlow::query()->orderBy('name')->get(),
+            'studentFlows' => StudentFlow::query()->with('groups')->whereNotNull('subject_id')->orderBy('name')->get(),
             'teacherNamesBySubject' => $this->teacherNamesBySubject($entries),
             'dayParts' => [
                 ['key' => 'morning', 'label' => 'Сутрин', 'after' => null, 'before' => '12:00'],
@@ -199,11 +199,17 @@ class ScheduleController extends Controller
         $data['room_id'] = isset($data['room_id']) ? (int) $data['room_id'] : null;
         $data['start_time'] .= ':00';
         $data['end_time'] .= ':00';
-        if (isset($data['student_flow_id']) && ! StudentFlow::query()
-            ->whereKey($data['student_flow_id'])
-            ->whereHas('groups', fn ($query) => $query->whereKey($entry->group_id))
-            ->exists()) {
-            throw ValidationException::withMessages(['student_flow_id' => 'Избраната група не е част от този поток.']);
+        if (isset($data['student_flow_id'])) {
+            $flow = StudentFlow::query()->with('groups')->findOrFail($data['student_flow_id']);
+            if (
+                $data['coverage_type'] !== 'lecture'
+                || $flow->subject_id !== $entry->subject_id
+                || ! $flow->groups->contains('id', $entry->group_id)
+            ) {
+                throw ValidationException::withMessages([
+                    'student_flow_id' => 'Потокът трябва да е за същата дисциплина и да включва избраната група.',
+                ]);
+            }
         }
         $data['locked'] = $request->boolean('locked');
 
@@ -246,11 +252,17 @@ class ScheduleController extends Controller
         $data['room_id'] = isset($data['room_id']) ? (int) $data['room_id'] : null;
         $data['start_time'] .= ':00';
         $data['end_time'] .= ':00';
-        if (isset($data['student_flow_id']) && ! StudentFlow::query()
-            ->whereKey($data['student_flow_id'])
-            ->whereHas('groups', fn ($query) => $query->whereKey($data['group_id']))
-            ->exists()) {
-            throw ValidationException::withMessages(['student_flow_id' => 'Избраната група не е част от този поток.']);
+        if (isset($data['student_flow_id'])) {
+            $flow = StudentFlow::query()->with('groups')->findOrFail($data['student_flow_id']);
+            if (
+                $data['coverage_type'] !== 'lecture'
+                || $flow->subject_id !== $data['subject_id']
+                || ! $flow->groups->contains('id', $data['group_id'])
+            ) {
+                throw ValidationException::withMessages([
+                    'student_flow_id' => 'Потокът трябва да е за същата дисциплина и да включва избраната група.',
+                ]);
+            }
         }
 
         $entry = $scheduleService->addManualEntry($data);
@@ -387,7 +399,22 @@ class ScheduleController extends Controller
     {
         return $entries->whereNotNull('subject_id')
             ->groupBy('subject_id')
-            ->map(fn (Collection $subjectEntries): array => $this->teacherNames($subjectEntries->pluck('teacher')->filter()))
+            ->map(fn (Collection $subjectEntries): array => $subjectEntries
+                ->groupBy(fn (TimetableEntry $entry): string => $entry->coverage_type ?? '')
+                ->flatMap(function (Collection $componentEntries, string $coverageType): array {
+                    $prefix = match ($coverageType) {
+                        'lecture' => 'Лекции: ',
+                        'exercise' => 'Упражнения: ',
+                        default => '',
+                    };
+
+                    return collect($this->teacherNames($componentEntries->pluck('teacher')->filter()))
+                        ->map(fn (string $name): string => $prefix.$name)
+                        ->all();
+                })
+                ->unique()
+                ->values()
+                ->all())
             ->all();
     }
 

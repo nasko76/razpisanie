@@ -20,6 +20,7 @@
         .card { padding:20px; border:1px solid var(--line); border-radius:14px; background:var(--paper); box-shadow:0 6px 24px rgba(32,54,41,.035); }
         .form { display:grid; gap:16px; }
         label { display:block; color:var(--muted); font-size:12px; font-weight:700; }
+        label[hidden] { display:none; }
         input,select { display:block; width:100%; min-height:40px; margin-top:6px; padding:0 10px; border:1px solid var(--line); border-radius:8px; background:#fff; color:var(--ink); font:inherit; }
         .button { display:inline-flex; min-height:40px; align-items:center; justify-content:center; padding:0 14px; border:1px solid var(--line); border-radius:9px; background:#fff; color:var(--ink); font:inherit; font-weight:700; text-decoration:none; cursor:pointer; }
         .button.primary { border-color:var(--green); background:var(--green); color:#fff; }
@@ -52,28 +53,51 @@
                 <label>Данни за импорт
                     <select name="kind" required>
                         <option value="curriculum" @selected(old('kind', 'curriculum') === 'curriculum')>Учебен план от запазена HTML страница</option>
-                        <option value="teachers" @selected(old('kind') === 'teachers')>Преподавателска обезпеченост от HTML/Excel .xls</option>
+                        <option value="teachers" @selected(old('kind') === 'teachers')>Преподавателско възлагане (HTML)</option>
                     </select>
                 </label>
-                <label>Версия на учебния план
-                    <select name="curriculum_version_id" required>
+                <label id="curriculum-version-field">Версия на учебния план
+                    <select name="curriculum_version_id">
                         <option value="">Изберете версия</option>
                         @foreach($curriculumVersions as $version)
                             <option value="{{ $version->id }}" @selected((string) old('curriculum_version_id') === (string) $version->id)>{{ $version->specialty->name }} · {{ $version->name }} ({{ $version->version_year }})</option>
                         @endforeach
                     </select>
                 </label>
-                <label>Файл
-                    <input type="file" name="file" accept=".html,.htm,.xls" required>
-                    <p class="help">До 20 MB. Поддържат се HTML/HTM и .xls файл, записан като HTML таблица. Бинарни .xls и .xlsx не се поддържат. Възрастта на преподавателите не се импортира.</p>
+                <label id="employment-category-field">Категория преподаватели
+                    <select name="employment_category">
+                        <option value="">Изберете категория</option>
+                        <option value="full_time" @selected(old('employment_category') === 'full_time')>Щатни</option>
+                        <option value="honorary" @selected(old('employment_category') === 'honorary')>Хонорувани</option>
+                    </select>
                 </label>
-                @if($curriculumVersions->isEmpty())
-                    <div class="notice">Преди импорт създайте специалност и версия на учебния план в каталога.</div>
-                @else
-                    <button class="button primary" type="submit">Провери файла</button>
-                @endif
+                <label id="academic-year-field">Учебна година
+                    <input name="academic_year" value="{{ old('academic_year') }}" placeholder="2026/2027" pattern="\d{4}/\d{4}">
+                </label>
+                <label>Файл
+                    <input type="file" name="file" accept=".html,.htm" required>
+                    <p class="help">До 20 MB. Учебните планове и преподавателските възлагания се подават като HTML/HTM; преподавателите, дисциплините, специалностите и групите се съпоставят или създават след преглед.</p>
+                </label>
+                <button class="button primary" type="submit">Провери файла</button>
             </form>
         </section>
     </main>
+    <script>
+        const importKind = document.querySelector('[name="kind"]');
+        const versionField = document.getElementById('curriculum-version-field');
+        const employmentField = document.getElementById('employment-category-field');
+        const academicYearField = document.getElementById('academic-year-field');
+        const updateImportFields = () => {
+            const isTeacherImport = importKind.value === 'teachers';
+            versionField.hidden = isTeacherImport;
+            versionField.querySelector('select').required = !isTeacherImport;
+            employmentField.hidden = !isTeacherImport;
+            employmentField.querySelector('select').required = isTeacherImport;
+            academicYearField.hidden = !isTeacherImport;
+            academicYearField.querySelector('input').required = isTeacherImport;
+        };
+        importKind.addEventListener('change', updateImportFields);
+        updateImportFields();
+    </script>
 </body>
 </html>

@@ -2,6 +2,7 @@
 
 use App\Models\CurriculumVersion;
 use App\Models\Specialty;
+use App\Models\StudentGroup;
 use App\Models\Subject;
 use App\Models\Teacher;
 use App\Models\User;
@@ -172,22 +173,43 @@ function savedCurriculumHtml(): string
         .'</tr></table></body></html>';
 }
 
-function workloadHtml(): string
-{
-    return '<!doctype html><html lang="bg"><meta charset="utf-8"><table id="ContentPlaceHolder1_gv_disc_obezp">'
-        .'<tr><th>Сем.</th><th>Дисциплина / Преподавател</th><th>Статут на дисциплината / Вид заетост</th><th>Катедра</th><th>Възраст</th></tr>'
-        .'<tr style="font-weight:bold"><td>1</td><td>Рисуване</td><td>Задължителна</td><td></td><td></td></tr>'
-        .'<tr><td>1</td><td>Иван Иванов</td><td>Лекции</td><td>Катедра А</td><td>48</td></tr>'
-        .'</table></html>';
+function planAzHtml(
+    string $teacherName = 'Доцент д-р Иван Иванов',
+    string $specialtyName = 'Изобразително изкуство - ССО',
+    ?array $rows = null,
+): string {
+    $rows ??= [['Рисуване', $specialtyName, '1', '1', '1', 'Л', '30', '24']];
+    $htmlRows = implode('', array_map(
+        fn (array $row): string => '<tr>'.implode('', array_map(fn (string $cell): string => '<td>'.$cell.'</td>', $row)).'</tr>',
+        $rows,
+    ));
+
+    return '<!doctype html><html lang="bg"><meta charset="utf-8"><p>'.$teacherName.' · Възложен и редуциран: 120</p>'
+        .'<table><tr><th>Дисциплина</th><th>Специалност</th><th>Курс</th><th>Сем.</th><th>Гр.</th><th>Л/У</th><th>Пл.ч.</th><th>Брой студ.</th></tr>'
+        .$htmlRows.'</table></html>';
 }
 
-function submitStudyImportPreview(string $kind, CurriculumVersion $version, string $html, string $filename = 'source.html')
-{
-    return test()->post(route('imports.preview'), [
+function submitStudyImportPreview(
+    string $kind,
+    ?CurriculumVersion $version,
+    string $html,
+    string $filename = 'source.html',
+    string $employmentCategory = 'full_time',
+    string $academicYear = '2026/2027',
+) {
+    $data = [
         'kind' => $kind,
-        'curriculum_version_id' => $version->id,
         'file' => UploadedFile::fake()->createWithContent($filename, $html),
-    ]);
+    ];
+    if ($version !== null) {
+        $data['curriculum_version_id'] = $version->id;
+    }
+    if ($kind === 'teachers') {
+        $data['employment_category'] = $employmentCategory;
+        $data['academic_year'] = $academicYear;
+    }
+
+    return test()->post(route('imports.preview'), $data);
 }
 
 it('previews and confirms curriculum rows while retaining source columns and missing values', function () {
@@ -370,88 +392,234 @@ it('shows ambiguous subject matches and imports only the explicitly selected rec
     $this->assertDatabaseCount('curriculum_subjects', 1);
 });
 
-it('imports teacher coverage without storing the age column', function () {
-    $version = createStudyImportVersion();
-    $subject = Subject::query()->create([
-        'code' => 'ART-101',
-        'name' => 'Рисуване',
-    ]);
-    $teacher = Teacher::query()->create([
-        'first_name' => 'Иван',
-        'last_name' => 'Иванов',
-        'max_daily_hours' => 8,
-        'weekly_workload_hours' => 0,
-    ]);
+it('previews and imports PlanAZ rows without requiring one curriculum version', function () {
     $admin = createStudyImportAdmin();
 
     $response = $this->actingAs($admin)
         ->post(route('imports.preview'), [
             'kind' => 'teachers',
-            'curriculum_version_id' => $version->id,
-            'file' => UploadedFile::fake()->createWithContent('plan.xls', workloadHtml()),
+            'employment_category' => 'full_time',
+            'academic_year' => '2026/2027',
+            'file' => UploadedFile::fake()->createWithContent('PlanAZ.html', planAzHtml()),
         ])
         ->assertOk()
-        ->assertViewHas('preview', fn (array $preview): bool => count($preview['rows']) === 1
-            && $preview['rows'][0]['teacher_name'] === 'Иван Иванов');
+        ->assertViewHas('preview');
+    $preview = $response->viewData('preview');
+    expect(count($preview['rows']))->toBe(1)
+        ->and($preview['version_id'])->toBeNull()
+        ->and($preview['rows'][0]['teacher_name'])->toBe('Доцент д-р Иван Иванов')
+        ->and($preview['rows'][0]['specialty_name'])->toBe('Изобразително изкуство')
+        ->and($preview['rows'][0]['coverage_type'])->toBe('lecture')
+        ->and($preview['rows'][0]['planned_hours'])->toBe(30);
 
+    $this->assertDatabaseCount('specialties', 0);
+    $this->assertDatabaseCount('student_groups', 0);
     $this->post(route('imports.confirm'), [
         'token' => $response->viewData('token'),
-        'subjects' => [0 => (string) $subject->id],
-        'teachers' => [0 => (string) $teacher->id],
+        'subjects' => [0 => 'create'],
+        'teachers' => [0 => 'create'],
     ])->assertRedirect(route('catalog.index'));
 
+    $this->assertDatabaseHas('specialties', ['name' => 'Изобразително изкуство']);
+    $this->assertDatabaseHas('student_groups', [
+        'course_year' => 1,
+        'group_name' => '1',
+        'student_count' => 24,
+    ]);
+
+    $teacher = Teacher::query()->firstOrFail();
+    $subject = Subject::query()->firstOrFail();
+    $groupId = StudentGroup::query()->value('id');
     $this->assertDatabaseHas('teacher_assignments', [
         'teacher_id' => $teacher->id,
         'subject_id' => $subject->id,
-        'curriculum_version_id' => $version->id,
+        'curriculum_version_id' => null,
+        'student_group_id' => $groupId,
+        'academic_year' => '2026/2027',
+        'employment_category' => 'full_time',
+        'planned_hours' => 30,
         'course_year' => 1,
         'semester' => 'winter',
         'coverage_type' => 'lecture',
     ]);
 
-    $source = $teacher->assignments()->firstOrFail()->source_data['columns'];
-    expect($source)->toHaveKey('Катедра')
-        ->and($source['Статут на дисциплината / Вид заетост'])->toBe('Лекции')
-        ->and($source)->not->toHaveKey('Възраст');
-
-    $again = submitStudyImportPreview('teachers', $version, workloadHtml(), 'plan.xls')->assertOk();
-    $this->post(route('imports.confirm'), [
-        'token' => $again->viewData('token'),
-        'subjects' => [0 => (string) $subject->id],
-        'teachers' => [0 => (string) $teacher->id],
-    ])->assertRedirect();
-    $this->assertDatabaseCount('teacher_assignments', 1);
+    $source = $teacher->assignments()->firstOrFail()->source_data;
+    expect($source['columns'])->toHaveKey('Брой студ.')
+        ->and($source['teacher_total_assigned_hours'])->toBe(120)
+        ->and($teacher->first_name)->toBe('Иван')
+        ->and($teacher->last_name)->toBe('Иванов');
 });
 
-it('defaults missing subject and teacher matches to create and imports them after confirmation', function () {
-    $version = createStudyImportVersion();
+it('associates each PlanAZ table with its preceding teacher name and strips workload metadata', function () {
     $admin = createStudyImportAdmin();
+    $existingTeacher = Teacher::query()->create([
+        'first_name' => 'Мария Стефанова',
+        'last_name' => 'Иванова',
+        'title' => 'доц.',
+        'max_daily_hours' => 8,
+        'weekly_workload_hours' => 12,
+        'active' => true,
+    ]);
+    $headers = ['Дисциплина', 'Вид', 'Специалност', 'ФО', 'Курс', 'Сем.', 'Гр.', 'Л/У', 'Пл.ч.', 'Брой студ.'];
+    $table = fn (array $row): string => '<table><tr>'.implode('', array_map(fn (string $header): string => '<th>'.$header.'</th>', $headers))
+        .'</tr><tr>'.implode('', array_map(fn (string $cell): string => '<td>'.$cell.'</td>', $row)).'</tr></table>';
+    $html = '<!doctype html><html lang="bg"><meta charset="utf-8"><body>'
+        .'<p><span class="h3">ас.</span> <span class="h3">Борислав</span> <span class="h3">Александров</span> <span class="h3">Петров</span> Задължителен норматив: 0 Възложен и редуциран: 24</p>'
+        .$table(['Рисуване', 'Задължителна', 'Изобразително изкуство - ССО', 'РФ', '1', '1', '1', 'Л', '24', '24'])
+        .'<p><span class="h3">доц.</span> <span class="h3">Мария</span> <span class="h3">Стефанова</span> <span class="h3">Иванова</span> Задължителен норматив: 80 Възложен и редуциран: 18</p>'
+        .$table(['Композиция', 'Задължителна', 'Изобразително изкуство - ССО', 'РФ', '1', '1', '2', 'У', '18', '20'])
+        .'</body></html>';
 
     $response = $this->actingAs($admin)
         ->post(route('imports.preview'), [
             'kind' => 'teachers',
-            'curriculum_version_id' => $version->id,
-            'file' => UploadedFile::fake()->createWithContent('plan.xls', workloadHtml()),
+            'employment_category' => 'full_time',
+            'academic_year' => '2026/2027',
+            'file' => UploadedFile::fake()->createWithContent('PlanAZ.html', $html),
         ])
-        ->assertOk()
-        ->assertSee('<option value="create" selected>Създай „Рисуване“ след потвърждение</option>', false)
-        ->assertSee('<option value="create" selected>Създай „Иван Иванов“ след потвърждение (натовареността остава 0)</option>', false);
+        ->assertOk();
+    $preview = $response->viewData('preview');
 
-    $this->assertDatabaseCount('teachers', 0);
-    $this->assertDatabaseCount('subjects', 0);
+    expect(count($preview['rows']))->toBe(2)
+        ->and($preview['rows'][0]['teacher_name'])->toBe('ас. Борислав Александров Петров')
+        ->and($preview['rows'][0]['teacher_parts']['first_name'])->toBe('Борислав Александров')
+        ->and($preview['rows'][0]['teacher_parts']['last_name'])->toBe('Петров')
+        ->and($preview['rows'][0]['teacher_total_assigned_hours'])->toBe(24)
+        ->and($preview['rows'][1]['teacher_name'])->toBe('доц. Мария Стефанова Иванова')
+        ->and($preview['rows'][1]['teacher_candidates'][0]['id'])->toBe($existingTeacher->id)
+        ->and($preview['rows'][1]['teacher_total_assigned_hours'])->toBe(18);
+
     $this->post(route('imports.confirm'), [
         'token' => $response->viewData('token'),
+        'subjects' => [0 => 'create', 1 => 'create'],
+        'teachers' => [0 => 'create', 1 => (string) $existingTeacher->id],
+    ])->assertRedirect(route('catalog.index'));
+
+    $createdTeacher = Teacher::query()->where('last_name', 'Петров')->firstOrFail();
+    $this->assertDatabaseHas('teacher_assignments', [
+        'teacher_id' => $createdTeacher->id,
+        'subject_id' => Subject::query()->where('name', 'Рисуване')->value('id'),
+        'coverage_type' => 'lecture',
+    ]);
+    $this->assertDatabaseHas('teacher_assignments', [
+        'teacher_id' => $existingTeacher->id,
+        'subject_id' => Subject::query()->where('name', 'Композиция')->value('id'),
+        'coverage_type' => 'exercise',
+    ]);
+});
+
+it('updates matching PlanAZ assignments on reimport without duplicating them', function () {
+    $this->actingAs(createStudyImportAdmin());
+    $specialty = Specialty::query()->create(['name' => 'Изобразително изкуство - ССО']);
+    $version = CurriculumVersion::query()->create([
+        'specialty_id' => $specialty->id,
+        'name' => 'План 2026',
+        'version_year' => 2026,
+        'is_active' => true,
+    ]);
+
+    $first = submitStudyImportPreview('teachers', null, planAzHtml())->assertOk();
+    $this->post(route('imports.confirm'), [
+        'token' => $first->viewData('token'),
         'subjects' => [0 => 'create'],
         'teachers' => [0 => 'create'],
     ])->assertRedirect();
 
-    $this->assertDatabaseHas('teachers', [
-        'first_name' => 'Иван',
-        'last_name' => 'Иванов',
-        'weekly_workload_hours' => 0,
-    ]);
-    $this->assertDatabaseHas('subjects', ['name' => 'Рисуване']);
+    $subject = Subject::query()->firstOrFail();
+    $teacher = Teacher::query()->firstOrFail();
+    $same = submitStudyImportPreview('teachers', null, planAzHtml())->assertOk();
+    $this->post(route('imports.confirm'), [
+        'token' => $same->viewData('token'),
+        'subjects' => [0 => (string) $subject->id],
+        'teachers' => [0 => (string) $teacher->id],
+    ])->assertRedirect();
     $this->assertDatabaseCount('teacher_assignments', 1);
+
+    $changedHtml = planAzHtml(rows: [['Рисуване', 'Изобразително изкуство - ССО', '1', '1', '1', 'Л', '32', '24']]);
+    $second = submitStudyImportPreview('teachers', null, $changedHtml)->assertOk();
+    $this->post(route('imports.confirm'), [
+        'token' => $second->viewData('token'),
+        'subjects' => [0 => (string) $subject->id],
+        'teachers' => [0 => (string) $teacher->id],
+    ])->assertRedirect();
+
+    $this->assertDatabaseCount('teacher_assignments', 1);
+    $this->assertDatabaseHas('teacher_assignments', [
+        'teacher_id' => $teacher->id,
+        'subject_id' => $subject->id,
+        'curriculum_version_id' => $version->id,
+        'planned_hours' => 32,
+    ]);
+    $this->assertDatabaseCount('specialties', 1);
+    $this->assertDatabaseCount('student_groups', 1);
+});
+
+it('imports separate staff and honorary files without duplicating a teacher', function () {
+    $this->actingAs(createStudyImportAdmin());
+
+    $staff = submitStudyImportPreview('teachers', null, planAzHtml())->assertOk();
+    $this->post(route('imports.confirm'), [
+        'token' => $staff->viewData('token'),
+        'subjects' => [0 => 'create'],
+        'teachers' => [0 => 'create'],
+    ])->assertRedirect();
+
+    $honorary = submitStudyImportPreview(
+        'teachers',
+        null,
+        planAzHtml(rows: [['Композиция', 'Изобразително изкуство - ССО', '1', '1', '2', 'У', '20', '18']]),
+        'PlanAZ-honorary.html',
+        'honorary',
+    )->assertOk();
+    $this->post(route('imports.confirm'), [
+        'token' => $honorary->viewData('token'),
+        'subjects' => [0 => 'create'],
+        'teachers' => [0 => (string) Teacher::query()->value('id')],
+    ])->assertRedirect();
+
+    $this->assertDatabaseCount('teachers', 1);
+    $this->assertDatabaseCount('teacher_assignments', 2);
+    $this->assertDatabaseHas('teacher_assignments', ['employment_category' => 'full_time']);
+    $this->assertDatabaseHas('teacher_assignments', ['employment_category' => 'honorary']);
+    $this->assertDatabaseCount('student_groups', 2);
+
+    $teacher = Teacher::query()->firstOrFail();
+    expect($teacher->title)->toBe('хон. пр. Доцент д-р');
+
+    $repeat = submitStudyImportPreview(
+        'teachers',
+        null,
+        planAzHtml(rows: [['Композиция', 'Изобразително изкуство - ССО', '1', '1', '2', 'У', '20', '18']]),
+        'PlanAZ-honorary.html',
+        'honorary',
+    )->assertOk();
+    $this->post(route('imports.confirm'), [
+        'token' => $repeat->viewData('token'),
+        'subjects' => [0 => (string) Subject::query()->where('name', 'Композиция')->value('id')],
+        'teachers' => [0 => (string) $teacher->id],
+    ])->assertRedirect();
+
+    $this->assertDatabaseCount('teachers', 1);
+    $this->assertDatabaseCount('teacher_assignments', 2);
+    expect($teacher->fresh()->title)->toBe('хон. пр. Доцент д-р');
+});
+
+it('rejects legacy spreadsheet imports and old teacher workload tables', function () {
+    $this->actingAs(createStudyImportAdmin());
+
+    $this->post(route('imports.preview'), [
+        'kind' => 'teachers',
+        'employment_category' => 'full_time',
+        'academic_year' => '2026/2027',
+        'file' => UploadedFile::fake()->createWithContent('PlanAZ.xls', planAzHtml()),
+    ])->assertSessionHasErrors('file');
+
+    $legacy = '<html><table><tr><th>Сем.</th><th>Дисциплина / Преподавател</th><th>Вид заетост</th></tr>'
+        .'<tr><td>1</td><td>Иван Иванов</td><td>Лекции</td></tr></table></html>';
+    submitStudyImportPreview('teachers', null, $legacy)->assertSessionHasErrors('file');
+
+    $this->assertDatabaseCount('teachers', 0);
+    $this->assertDatabaseCount('teacher_assignments', 0);
 });
 
 it('rejects malformed or unsupported workbook content during preview', function () {

@@ -139,7 +139,7 @@
                     <select id="group_id" name="group_id" required>
                         @foreach($groups as $group)
                             <option value="{{ $group->id }}" @selected($selectedGroup?->id === $group->id)>
-                                {{ $group->specialty->name }} · {{ $group->course_year }} курс · {{ $group->group_name }}
+                                {{ $group->specialty->name }} · {{ $group->display_name }}
                             </option>
                         @endforeach
                     </select>
@@ -178,7 +178,7 @@
                 <div class="schedule-head">
                     <div>
                         <h2 class="panel-title" style="margin:0 0 3px">
-                            {{ $selectedGroup ? $selectedGroup->specialty->name.' · '.$selectedGroup->group_name : 'Изберете група' }}
+                            {{ $selectedGroup ? $selectedGroup->specialty->name.' · '.$selectedGroup->display_name : 'Изберете курс' }}
                         </h2>
                         <div class="week-caption">{{ $academicYear }} · {{ $semesterType === 'winter' ? 'Зимен семестър' : 'Летен семестър' }} · Седмици 1, 2 и 3</div>
                     </div>
@@ -223,7 +223,8 @@
                                                     @php
                                                         $subjectTeacherNames = $teacherNamesBySubject[$entry->subject_id] ?? [];
                                                         if ($subjectTeacherNames === [] && $entry->teacher) {
-                                                            $subjectTeacherNames[] = trim(($entry->teacher->title ? $entry->teacher->title.' ' : '').$entry->teacher->first_name.' '.$entry->teacher->last_name);
+                                                            $coverageLabel = $entry->coverage_type === 'lecture' ? 'Лекции: ' : ($entry->coverage_type === 'exercise' ? 'Упражнения: ' : '');
+                                                            $subjectTeacherNames[] = $coverageLabel.trim(($entry->teacher->title ? $entry->teacher->title.' ' : '').$entry->teacher->first_name.' '.$entry->teacher->last_name);
                                                         }
                                                     @endphp
                                                     <article class="lesson"
@@ -246,20 +247,8 @@
                                                                     <input type="hidden" name="group_id" value="{{ $selectedGroup->id }}">
                                                                     <input type="hidden" name="academic_year" value="{{ $academicYear }}">
                                                                     <input type="hidden" name="semester_type" value="{{ $semesterType }}">
-                                                                    <label>Седмица
-                                                                        <select name="cycle_week">
-                                                                            @foreach([1, 2, 3] as $week)
-                                                                                <option value="{{ $week }}" @selected($entry->cycle_week === $week)>{{ $week }}</option>
-                                                                            @endforeach
-                                                                        </select>
-                                                                    </label>
-                                                                    <label>Ден
-                                                                        <select name="weekday_no">
-                                                                            @foreach($weekdays as $dayValue => $dayLabel)
-                                                                                <option value="{{ $dayValue }}" @selected($entry->weekday_no === $dayValue)>{{ $dayLabel }}</option>
-                                                                            @endforeach
-                                                                        </select>
-                                                                    </label>
+                                                                    <input type="hidden" name="cycle_week" value="{{ $entry->cycle_week }}">
+                                                                    <input type="hidden" name="weekday_no" value="{{ $entry->weekday_no }}">
                                                                     <label>Начален час<input type="time" name="start_time" value="{{ substr($entry->start_time, 0, 5) }}" required></label>
                                                                     <label>Краен час<input type="time" name="end_time" value="{{ substr($entry->end_time, 0, 5) }}" required></label>
                                                                     <label>Учебни часове<input type="number" name="duration_hours" min="1" max="16" value="{{ $entry->duration_hours }}" required></label>
@@ -276,7 +265,9 @@
                                                                         <select name="student_flow_id">
                                                                             <option value="">Без общ поток</option>
                                                                             @foreach($studentFlows as $flow)
-                                                                                <option value="{{ $flow->id }}" @selected($entry->student_flow_id === $flow->id)>{{ $flow->name }}</option>
+                                                                                @if($flow->subject_id === $entry->subject_id && $flow->groups->contains('id', $entry->group_id))
+                                                                                    <option value="{{ $flow->id }}" @selected($entry->student_flow_id === $flow->id)>{{ $flow->subject?->name }} · {{ $flow->name }}</option>
+                                                                                @endif
                                                                             @endforeach
                                                                         </select>
                                                                     </label>
@@ -372,12 +363,13 @@
                                 <input type="hidden" name="academic_year" value="{{ $academicYear }}">
                                 <input type="hidden" name="semester_type" value="{{ $semesterType }}">
                                 <label>Седмица<select name="cycle_week">@foreach([1, 2, 3] as $week)<option value="{{ $week }}" @selected($cycleWeek === $week)>Седмица {{ $week }}</option>@endforeach</select></label>
-                                <label>Наименование<input name="custom_subject_name" maxlength="255" required></label>
+                                <label>Дисциплина от плана (по избор)<select name="subject_id" class="manual-subject-select"><option value="">Без каталожна дисциплина</option>@foreach($curriculumSubjects as $curriculumSubject)<option value="{{ $curriculumSubject->subject_id }}">{{ $curriculumSubject->subject?->code }} · {{ $curriculumSubject->subject?->name }}</option>@endforeach</select></label>
+                                <label>Наименование<input name="custom_subject_name" maxlength="255"></label>
                                 <label>Ден<select name="weekday_no">@foreach($weekdays as $dayNo => $dayLabel)<option value="{{ $dayNo }}">{{ $dayLabel }}</option>@endforeach</select></label>
                                 <label>Начален час<input type="time" name="start_time" value="08:00" required></label>
                                 <label>Краен час<input type="time" name="end_time" value="11:45" required></label>
                                 <label>Учебни часове<input type="number" name="duration_hours" min="1" max="16" value="4" required></label>
-                                <label>Поток<select name="student_flow_id"><option value="">Без общ поток</option>@foreach($studentFlows as $flow)<option value="{{ $flow->id }}">{{ $flow->name }}</option>@endforeach</select></label>
+                                <label>Поток<select name="student_flow_id" class="manual-flow-select"><option value="">Без общ поток</option>@foreach($studentFlows as $flow)<option value="{{ $flow->id }}" data-subject="{{ $flow->subject_id }}" data-groups="{{ $flow->groups->pluck('id')->join(',') }}">{{ $flow->subject?->name }} · {{ $flow->name }}</option>@endforeach</select></label>
                                 <label>Вид занятие<select name="coverage_type"><option value="">Не е уточнен</option><option value="lecture">Лекции</option><option value="exercise">Упражнения</option></select></label>
                                 <label>Преподавател<select name="teacher_id"><option value="">Без преподавател</option>@foreach($teachers as $teacher)<option value="{{ $teacher->id }}">{{ $teacher->title }} {{ $teacher->first_name }} {{ $teacher->last_name }}</option>@endforeach</select></label>
                                 <label>Зала<select name="room_id"><option value="">Без зала</option>@foreach($rooms as $room)<option value="{{ $room->id }}">{{ $room->name }}</option>@endforeach</select></label>
@@ -422,7 +414,7 @@
                 if (!draggedEntry) return;
 
                 const form = draggedEntry.querySelector('.edit-form');
-                const targetStartMinutes = { morning: 8 * 60, afternoon: 13 * 60, evening: 16 * 60 }[zone.dataset.dropPart];
+                const targetStartMinutes = { morning: 8 * 60, afternoon: 13 * 60, evening: 17 * 60 }[zone.dataset.dropPart];
                 const [currentStartHour, currentStartMinute] = form.elements.start_time.value.split(':').map(Number);
                 const [currentEndHour, currentEndMinute] = form.elements.end_time.value.split(':').map(Number);
                 const elapsedMinutes = (currentEndHour * 60 + currentEndMinute) - (currentStartHour * 60 + currentStartMinute);
@@ -462,6 +454,29 @@
                 const result = await response.json();
                 message.textContent = Object.values(result.errors ?? {}).flat().join(' ');
             });
+        });
+
+        document.querySelectorAll('.manual-subject-select').forEach((subjectSelect) => {
+            const form = subjectSelect.closest('form');
+            const flowSelect = form.querySelector('.manual-flow-select');
+            const groupId = form.elements.group_id.value;
+            const updateFlowOptions = () => {
+                for (const option of flowSelect.options) {
+                    if (option.value === '') {
+                        continue;
+                    }
+
+                    const belongsToSubject = option.dataset.subject === subjectSelect.value;
+                    const includesGroup = option.dataset.groups.split(',').includes(groupId);
+                    option.hidden = !belongsToSubject || !includesGroup;
+                    if (option.hidden && option.selected) {
+                        flowSelect.value = '';
+                    }
+                }
+            };
+
+            subjectSelect.addEventListener('change', updateFlowOptions);
+            updateFlowOptions();
         });
     </script>
 </body>

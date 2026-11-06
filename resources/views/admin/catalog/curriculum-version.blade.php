@@ -9,7 +9,7 @@
         * { box-sizing:border-box; }
         body { margin:0; background:var(--canvas); color:var(--ink); font:14px/1.45 Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif; }
         a { color:inherit; text-decoration:none; }
-        .shell { max-width:1320px; margin:auto; padding:24px clamp(14px,3vw,40px) 48px; }
+        .shell { width:100%; max-width:1920px; margin:auto; padding:24px clamp(14px,3vw,48px) 48px; }
         .topbar,.heading { display:flex; align-items:center; justify-content:space-between; gap:16px; }
         .topbar { margin-bottom:30px; color:var(--muted); font-size:13px; }
         .brand { display:flex; align-items:center; gap:10px; color:var(--ink); font-weight:750; }
@@ -31,6 +31,11 @@
         .tag { display:inline-block; padding:3px 7px; border-radius:20px; background:#e8f4ed; color:var(--green); font-size:10px; font-weight:700; }
         .empty { color:var(--muted); }
         .button { display:inline-flex; min-height:38px; align-items:center; padding:0 12px; border:1px solid var(--line); border-radius:9px; background:white; font-weight:650; }
+        details { margin-top:8px; }
+        summary { display:inline-flex; min-height:38px; align-items:center; padding:0 12px; border:1px solid var(--line); border-radius:9px; background:white; color:var(--green); font-weight:650; cursor:pointer; }
+        summary::-webkit-details-marker { display:none; }
+        details[open]>summary { margin-bottom:8px; background:#f6fbf7; }
+        .record-actions { display:flex; flex-wrap:wrap; align-items:center; gap:7px; }
         .forms { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:10px; padding:16px 19px; border-bottom:1px solid var(--line); background:#fbfcfb; }
         label { display:block; color:var(--muted); font-size:11px; font-weight:700; }
         input,select { width:100%; min-height:37px; margin-top:5px; padding:0 9px; border:1px solid var(--line); border-radius:8px; background:#fff; }
@@ -55,11 +60,24 @@
             <p class="muted">Версия {{ $curriculumVersion->version_year }} · {{ $curriculumSubjects->count() }} дисциплини</p>
         </div>
         <div>
-            <form method="POST" action="{{ route('catalog.curriculum-versions.duplicate', $curriculumVersion) }}" style="display:inline-block">
-                @csrf
-                <button class="button" type="submit">Копирай план</button>
-            </form>
-            <a class="button" href="{{ route('catalog.index', ['tab' => 'plans']) }}">Назад към плановете</a>
+            <details>
+                <summary>Действия</summary>
+                <div class="record-actions">
+                    <form method="POST" action="{{ route('catalog.curriculum-versions.duplicate', $curriculumVersion) }}">
+                        @csrf
+                        <button class="button" type="submit">Копирай план</button>
+                    </form>
+                    <form method="POST" action="{{ route('catalog.curriculum-versions.update', $curriculumVersion) }}">
+                        @csrf @method('PATCH')
+                        <button class="button" name="is_active" value="{{ $curriculumVersion->is_active ? '0' : '1' }}">{{ $curriculumVersion->is_active ? 'Архивирай' : 'Активирай' }}</button>
+                    </form>
+                    <form method="POST" action="{{ route('catalog.curriculum-versions.destroy', $curriculumVersion) }}" onsubmit="return confirm('Изтриването премахва плана и дисциплините в него. Курсовете ще останат без план. Продължаване?')">
+                        @csrf @method('DELETE')
+                        <button class="button" type="submit" style="color:#a83232">Изтрий версията</button>
+                    </form>
+                    <a class="button" href="{{ route('catalog.index', ['tab' => 'plans']) }}">Назад към плановете</a>
+                </div>
+            </details>
         </div>
     </section>
 
@@ -93,12 +111,26 @@
                 @forelse($curriculumSubjects as $curriculumSubject)
                     @php
                         $semester = $curriculumSubject->semester_no % 2 === 1 ? 'winter' : 'summer';
-                        $assignmentKey = implode(':', [
-                            $curriculumSubject->subject_id,
-                            $curriculumSubject->course_year,
-                            $semester,
-                        ]);
-                        $subjectAssignments = $assignments->get($assignmentKey, collect());
+                        $subjectAssignments = $assignments->filter(function ($assignment) use ($curriculumSubject, $curriculumVersion, $semester): bool {
+                            if (
+                                $assignment->subject_id !== $curriculumSubject->subject_id
+                                || ! in_array($assignment->semester, [null, $semester], true)
+                            ) {
+                                return false;
+                            }
+
+                            if (
+                                $assignment->curriculum_version_id === $curriculumVersion->id
+                                && $assignment->course_year === $curriculumSubject->course_year
+                            ) {
+                                return true;
+                            }
+
+                            return $assignment->studentFlow?->groups->contains(
+                                fn ($group): bool => $group->curriculum_version_id === $curriculumVersion->id
+                                    && $group->course_year === $curriculumSubject->course_year,
+                            ) ?? false;
+                        });
                         $auditoriumHours = (int) ($curriculumSubject->subject?->auditorium_hours ?? 0);
                         $selfStudyHours = (int) ($curriculumSubject->subject?->self_study_hours ?? 0);
                     @endphp

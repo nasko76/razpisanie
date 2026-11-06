@@ -26,4 +26,9 @@ class Subject extends Model
     {
         return $this->hasMany(TimetableEntry::class);
     }
+
+    public function studentFlows(): HasMany
+    {
+        return $this->hasMany(StudentFlow::class);
+    }
 }
