@@ -464,9 +464,9 @@ it('associates each PlanAZ table with its preceding teacher name and strips work
     $table = fn (array $row): string => '<table><tr>'.implode('', array_map(fn (string $header): string => '<th>'.$header.'</th>', $headers))
         .'</tr><tr>'.implode('', array_map(fn (string $cell): string => '<td>'.$cell.'</td>', $row)).'</tr></table>';
     $html = '<!doctype html><html lang="bg"><meta charset="utf-8"><body>'
-        .'<p>ас. Борислав Александров Петров Задължителен норматив: 0 Възложен и редуциран: 24</p>'
+        .'<p><span class="h3">ас.</span> <span class="h3">Борислав</span> <span class="h3">Александров</span> <span class="h3">Петров</span> Задължителен норматив: 0 Възложен и редуциран: 24</p>'
         .$table(['Рисуване', 'Задължителна', 'Изобразително изкуство - ССО', 'РФ', '1', '1', '1', 'Л', '24', '24'])
-        .'<p>доц. Мария Стефанова Иванова Задължителен норматив: 80 Възложен и редуциран: 18</p>'
+        .'<p><span class="h3">доц.</span> <span class="h3">Мария</span> <span class="h3">Стефанова</span> <span class="h3">Иванова</span> Задължителен норматив: 80 Възложен и редуциран: 18</p>'
         .$table(['Композиция', 'Задължителна', 'Изобразително изкуство - ССО', 'РФ', '1', '1', '2', 'У', '18', '20'])
         .'</body></html>';
 
@@ -582,6 +582,26 @@ it('imports separate staff and honorary files without duplicating a teacher', fu
     $this->assertDatabaseHas('teacher_assignments', ['employment_category' => 'full_time']);
     $this->assertDatabaseHas('teacher_assignments', ['employment_category' => 'honorary']);
     $this->assertDatabaseCount('student_groups', 2);
+
+    $teacher = Teacher::query()->firstOrFail();
+    expect($teacher->title)->toBe('хон. пр. Доцент д-р');
+
+    $repeat = submitStudyImportPreview(
+        'teachers',
+        null,
+        planAzHtml(rows: [['Композиция', 'Изобразително изкуство - ССО', '1', '1', '2', 'У', '20', '18']]),
+        'PlanAZ-honorary.html',
+        'honorary',
+    )->assertOk();
+    $this->post(route('imports.confirm'), [
+        'token' => $repeat->viewData('token'),
+        'subjects' => [0 => (string) Subject::query()->where('name', 'Композиция')->value('id')],
+        'teachers' => [0 => (string) $teacher->id],
+    ])->assertRedirect();
+
+    $this->assertDatabaseCount('teachers', 1);
+    $this->assertDatabaseCount('teacher_assignments', 2);
+    expect($teacher->fresh()->title)->toBe('хон. пр. Доцент д-р');
 });
 
 it('rejects legacy spreadsheet imports and old teacher workload tables', function () {

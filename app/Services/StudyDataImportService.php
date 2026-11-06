@@ -144,6 +144,11 @@ class StudyDataImportService
 
                 $subject = $this->resolveSubject($subjectChoice, $row['subject_candidates'], $row, $createdSubjects);
                 $teacher = $this->resolveTeacher($teacherChoice, $row['teacher_candidates'], $row, $createdTeachers);
+                if ($preview['employment_category'] === 'honorary') {
+                    $teacher->forceFill([
+                        'title' => $this->honoraryTeacherTitle($teacher->title),
+                    ])->save();
+                }
                 $specialty = $this->resolveSpecialty($row['specialty_name']);
                 $group = $this->resolveStudentGroup($specialty, $row);
                 $assignment = TeacherAssignment::query()->firstOrNew([
@@ -346,6 +351,9 @@ class StudyDataImportService
             $context = $contexts[$tableIndex] ?? ['teacher_name' => '', 'total_assigned_hours' => null, 'header_text' => ''];
             $teacherName = $context['teacher_name'];
             $teacher = $this->splitTeacherName($teacherName);
+            if ($teacher !== null && $employmentCategory === 'honorary') {
+                $teacher['title'] = $this->honoraryTeacherTitle($teacher['title']);
+            }
             $candidateTeachers = $teacher === null
                 ? []
                 : $this->findTeacherCandidates($teachers, $teacherName, $teacher);
@@ -583,6 +591,19 @@ class StudyDataImportService
             $contextTexts = [];
             $teacherName = '';
 
+            $precedingParagraphs = $xpath->query('preceding::p[not(ancestor::table)]', $table);
+            if ($precedingParagraphs !== false && $precedingParagraphs->length > 0) {
+                $paragraph = $precedingParagraphs->item($precedingParagraphs->length - 1);
+                if ($paragraph instanceof DOMElement) {
+                    $teacherName = $this->teacherNameFromParagraph($paragraph, $xpath);
+                    $paragraphText = preg_replace('/\s+/u', ' ', trim($paragraph->textContent)) ?? '';
+                    if ($teacherName === '') {
+                        $teacherName = $this->teacherNameFromContext($paragraphText);
+                    }
+                    $contextTexts[] = $this->repairMojibake($paragraphText);
+                }
+            }
+
             if ($preceding !== false) {
                 for ($index = $preceding->length - 1; $index >= max(0, $preceding->length - 8); $index--) {
                     $node = $preceding->item($index);
@@ -631,6 +652,31 @@ class StudyDataImportService
             'total_assigned_hours' => $context['totalAssignedHours'],
             'header_text' => $context['headerText'],
         ], $contexts);
+    }
+
+    private function teacherNameFromParagraph(DOMElement $paragraph, DOMXPath $xpath): string
+    {
+        $nameElements = $xpath->query(
+            './/*[contains(concat(" ", normalize-space(@class), " "), " h3 ")]',
+            $paragraph,
+        );
+        if ($nameElements === false) {
+            return '';
+        }
+
+        $parts = [];
+        foreach ($nameElements as $element) {
+            $part = preg_replace('/\s+/u', ' ', trim($element->textContent)) ?? '';
+            if ($part !== '') {
+                $parts[] = $this->repairMojibake($part);
+            }
+        }
+
+        if (count($parts) < 3) {
+            return '';
+        }
+
+        return implode(' ', $parts);
     }
 
     private function teacherNameFromContext(string $context): string
@@ -1110,7 +1156,7 @@ class StudyDataImportService
         $value = trim($name);
         $title = null;
 
-        while (preg_match('/^(проф(?:есор)?\.?|доц(?:ент)?\.?|гл\.?\s*ас\.?|ас\.?|д-р|доктор)\s*/iu', $value, $matches) === 1) {
+        while (preg_match('/^(хон\.?\s*пр\.?|проф(?:есор)?\.?|доц(?:ент)?\.?|гл\.?\s*ас\.?|ас\.?|д-р|доктор)\s*/iu', $value, $matches) === 1) {
             $title = trim(($title ? $title.' ' : '').trim($matches[1]));
             $value = trim(substr($value, strlen($matches[0])));
         }
@@ -1126,6 +1172,16 @@ class StudyDataImportService
             'last_name' => array_pop($parts),
             'title' => $title,
         ];
+    }
+
+    private function honoraryTeacherTitle(?string $title): string
+    {
+        $title = trim((string) $title);
+        if (preg_match('/^хон\.?\s*пр\.?(?:\s|$)/iu', $title) === 1) {
+            return $title;
+        }
+
+        return trim('хон. пр. '.$title);
     }
 
     /**
