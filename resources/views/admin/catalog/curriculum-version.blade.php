@@ -133,8 +133,9 @@
                                     && $group->course_year === $curriculumSubject->course_year,
                             ) ?? false;
                         });
-                        $auditoriumHours = (int) ($curriculumSubject->subject?->auditorium_hours ?? 0);
-                        $selfStudyHours = (int) ($curriculumSubject->subject?->self_study_hours ?? 0);
+                        $hourValues = $curriculumSubject->hourValues();
+                        $auditoriumHours = $hourValues['auditorium_hours'];
+                        $selfStudyHours = $hourValues['self_study_hours'];
                         $categoryLabels = ['mandatory' => 'Задължителна', 'elective' => 'Избираема дисциплина', 'optional' => 'Факултативна дисциплина'];
                     @endphp
                     <tr>
@@ -153,7 +154,7 @@
                                 </form>
                             @endif
                         </td>
-                        <td class="hours">{{ $auditoriumHours }} ч.<br><span class="muted">Л {{ $curriculumSubject->subject?->lecture_hours }} · У {{ $curriculumSubject->subject?->exercise_hours }}</span></td>
+                        <td class="hours">{{ $auditoriumHours }} ч.<br><span class="muted">Л {{ $hourValues['lecture_hours'] }} · У {{ $hourValues['exercise_hours'] }}</span></td>
                         <td>{{ $selfStudyHours }} ч.</td>
                         <td><strong>{{ $auditoriumHours + $selfStudyHours }} ч.</strong></td>
                         <td>{{ [
@@ -163,14 +164,14 @@
                             'Текущ контрол' => 'Текущ контрол (ТО)',
                             'П' => 'Продължаваща дисциплина (П)',
                             'Продължаваща дисциплина' => 'Продължаваща дисциплина (П)',
-                        ][$curriculumSubject->subject?->control_type] ?? ($curriculumSubject->subject?->control_type ?: '—') }}
-                        @if($curriculumSubject->subject?->control_type === 'П')
+                        ][$hourValues['control_type']] ?? ($hourValues['control_type'] ?: '—') }}
+                        @if($hourValues['control_type'] === 'П')
                             <br><span class="muted">Оценяването е в следващия семестър</span>
                         @endif
                         </td>
                         <td>
                             @forelse($subjectAssignments as $assignment)
-                                <span class="teacher">{{ $assignment->teacher?->title }} {{ $assignment->teacher?->first_name }} {{ $assignment->teacher?->last_name }} <span class="tag">{{ $assignment->coverage_type === 'lecture' ? 'Лекции' : 'Упражнения' }}</span>@if($assignment->studentFlow)<span class="tag">{{ $assignment->studentFlow->name }}</span>@endif</span>
+                                <span class="teacher">{{ $assignment->teacher?->title }} {{ $assignment->teacher?->first_name }} {{ $assignment->teacher?->last_name }} <span class="tag">{{ $assignment->coverage_type === 'lecture' ? 'Лекции' : 'Упражнения' }}</span>@if($assignment->studentGroup)<span class="tag">Група {{ $assignment->studentGroup->group_name ?: 'обща' }}</span>@endif @if($assignment->studentFlow)<span class="tag">{{ $assignment->studentFlow->name }}</span>@endif</span>
                             @empty
                                 <span class="empty">Не е назначен преподавател</span>
                             @endforelse
@@ -182,6 +183,11 @@
                                     <label>Курс<input name="course_year" type="number" min="1" max="6" value="{{ $curriculumSubject->course_year }}" required></label>
                                     <label>Семестър<input name="semester_no" type="number" min="1" max="12" value="{{ $curriculumSubject->semester_no }}" required></label>
                                     <label>Категория<select name="subject_category" required>@foreach(['mandatory' => 'Задължителна', 'elective' => 'Избираема', 'optional' => 'Факултативна'] as $value => $label)<option value="{{ $value }}" @selected($curriculumSubject->subject_category === $value)>{{ $label }}</option>@endforeach</select></label>
+                                    <label>АЗ<input name="auditorium_hours" type="number" min="0" max="1000" value="{{ $hourValues['auditorium_hours'] }}" required></label>
+                                    <label>Лекции<input name="lecture_hours" type="number" min="0" max="1000" value="{{ $hourValues['lecture_hours'] }}" required></label>
+                                    <label>Упражнения<input name="exercise_hours" type="number" min="0" max="1000" value="{{ $hourValues['exercise_hours'] }}" required></label>
+                                    <label>Самоподготовка<input name="self_study_hours" type="number" min="0" max="1000" value="{{ $hourValues['self_study_hours'] }}" required></label>
+                                    <label>Форма на контрол<select name="control_type"><option value="" @selected(!$hourValues['control_type'])>Не е зададена</option><option value="И" @selected($hourValues['control_type'] === 'И')>Изпит (И)</option><option value="ТО" @selected($hourValues['control_type'] === 'ТО')>Текущ контрол (ТО)</option><option value="П" @selected($hourValues['control_type'] === 'П')>Продължаваща дисциплина (П)</option></select></label>
                                     <button class="button" type="submit">Запази</button>
                                 </form>
                                 <form method="POST" action="{{ route('catalog.curriculum-subjects.destroy', $curriculumSubject) }}" onsubmit="return confirm('Премахване на дисциплината от плана?')">

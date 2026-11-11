@@ -12,6 +12,8 @@ use App\Models\Subject;
 use App\Models\Teacher;
 use App\Models\TeacherAbsence;
 use App\Models\TeacherAssignment;
+use App\Models\TimetableEntry;
+use App\Models\User;
 use Carbon\CarbonImmutable;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
@@ -19,15 +21,21 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\Rule;
 use Illuminate\Validation\ValidationException;
 use Illuminate\View\View;
+use Spatie\Permission\Models\Role;
 
 class CatalogController extends Controller
 {
     public function index(Request $request): View
     {
+        $user = $request->user();
+        $isDepartmentHead = $user?->hasRole('department_head') && ! $user->hasRole('admin');
+        abort_unless(! $isDepartmentHead || filled($user->department), 403);
         $activeTab = $request->string('tab')->toString();
-        $activeTab = in_array($activeTab, ['plans', 'subjects', 'teachers', 'organization'], true)
+        $activeTab = $isDepartmentHead
+            ? 'teachers'
+            : (in_array($activeTab, ['plans', 'subjects', 'teachers', 'organization'], true)
             ? $activeTab
-            : 'plans';
+            : 'plans');
         $subjectSort = in_array($request->query('subject_sort'), ['name', 'auditorium_hours', 'code'], true)
             ? $request->query('subject_sort')
             : 'name';
@@ -35,8 +43,16 @@ class CatalogController extends Controller
             ? $request->query('subject_in_curriculum')
             : '';
         $subjectPlanId = $request->integer('subject_plan_id');
-        $teacherPlanId = $request->integer('teacher_plan_id');
-        $subjectsQuery = Subject::query()->withCount('curriculumSubjects');
+        $teacherPlanId = $isDepartmentHead ? 0 : $request->integer('teacher_plan_id');
+        $teacherDepartmentFilter = $isDepartmentHead
+            ? $user->department
+            : $request->query('teacher_department');
+        $subjectsQuery = Subject::query()
+            ->with([
+                'curriculumSubjects.curriculumVersion.specialty',
+                'curriculumSubjects.subject',
+            ])
+            ->withCount('curriculumSubjects');
         if ($subjectPlanId > 0) {
             $subjectsQuery->whereHas('curriculumSubjects', fn ($query) => $query->where('curriculum_version_id', $subjectPlanId));
         } elseif ($subjectCurriculumFilter === 'included') {
@@ -45,11 +61,19 @@ class CatalogController extends Controller
             $subjectsQuery->doesntHave('curriculumSubjects');
         }
         if ($subjectSort === 'auditorium_hours') {
-            $subjectsQuery->orderByDesc('auditorium_hours')->orderBy('name');
+            $subjectsQuery
+                ->orderByDesc(CurriculumSubject::query()
+                    ->selectRaw('MAX(auditorium_hours)')
+                    ->whereColumn('curriculum_subjects.subject_id', 'subjects.id')
+                    ->when($subjectPlanId > 0, fn ($query) => $query->where('curriculum_version_id', $subjectPlanId)))
+                ->orderBy('name');
         } else {
             $subjectsQuery->orderBy($subjectSort)->orderBy('name');
         }
         $teachersQuery = Teacher::query()->with('absences')->withCount('assignments')->orderBy('last_name');
+        if (filled($teacherDepartmentFilter)) {
+            $teachersQuery->where('department', $teacherDepartmentFilter);
+        }
         if ($teacherPlanId > 0) {
             $teachersQuery->where(function ($query) use ($teacherPlanId): void {
                 $query->whereHas('assignments', fn ($assignments) => $assignments->where('curriculum_version_id', $teacherPlanId))
@@ -61,16 +85,156 @@ class CatalogController extends Controller
         return view('admin.catalog', [
             'specialties' => Specialty::query()->withCount('curriculumVersions')->orderBy('name')->get(),
             'curriculumVersions' => CurriculumVersion::query()->with('specialty')->withCount('subjects')->orderByDesc('version_year')->get(),
-            'groups' => StudentGroup::query()->with(['specialty', 'curriculumVersion'])->orderBy('course_year')->orderBy('group_name')->get(),
+            'groups' => StudentGroup::query()
+                ->with(['specialty', 'curriculumVersion.subjects'])
+                ->orderBy(Specialty::query()->select('name')->whereColumn('specialties.id', 'student_groups.specialty_id'))
+                ->orderBy('course_year')
+                ->orderBy('group_name')
+                ->get(),
             'subjects' => $subjectsQuery->get(),
             'teachers' => $teachersQuery->get(),
             'rooms' => Room::query()->orderBy('name')->get(),
-            'studentFlows' => StudentFlow::query()->with(['groups.specialty', 'subject'])->withCount('groups')->orderBy('name')->get(),
+            'studentFlows' => StudentFlow::query()
+                ->with([
+                    'groups' => fn ($query) => $query
+                        ->with('specialty')
+                        ->orderBy(Specialty::query()->select('name')->whereColumn('specialties.id', 'student_groups.specialty_id'))
+                        ->orderBy('course_year')
+                        ->orderBy('group_name'),
+                    'subject',
+                ])
+                ->withCount('groups')
+                ->orderBy('name')
+                ->orderBy('id')
+                ->get(),
             'activeTab' => $activeTab,
             'subjectSort' => $subjectSort,
             'subjectCurriculumFilter' => $subjectCurriculumFilter,
             'subjectPlanId' => $subjectPlanId,
             'teacherPlanId' => $teacherPlanId,
+            'teacherDepartmentFilter' => $teacherDepartmentFilter,
+            'teacherDepartments' => Teacher::query()
+                ->whereNotNull('department')
+                ->where('department', '!=', '')
+                ->distinct()
+                ->orderBy('department')
+                ->pluck('department'),
+            'isDepartmentHead' => (bool) $isDepartmentHead,
+            'users' => $isDepartmentHead ? collect() : User::query()->orderBy('name')->get(),
+        ]);
+    }
+
+    public function updateDepartmentHead(Request $request): RedirectResponse
+    {
+        $data = $request->validate([
+            'user_id' => ['required', 'integer', 'exists:users,id'],
+            'is_department_head' => ['required', 'boolean'],
+            'department' => ['nullable', 'string', 'max:255'],
+        ]);
+        $user = User::query()->findOrFail($data['user_id']);
+
+        if ($data['is_department_head']) {
+            $departments = Teacher::query()
+                ->whereNotNull('department')
+                ->where('department', '!=', '')
+                ->distinct()
+                ->pluck('department')
+                ->all();
+            validator($data, [
+                'department' => ['required', Rule::in($departments)],
+            ])->validate();
+
+            $user->forceFill(['department' => $data['department']])->save();
+            $user->assignRole(Role::findOrCreate('department_head', 'web'));
+        } else {
+            $user->removeRole('department_head');
+            if (! $user->hasRole('admin')) {
+                $user->forceFill(['department' => null])->save();
+            }
+        }
+
+        return $this->saved('Достъпът на ръководителя на катедра е обновен.', 'teachers');
+    }
+
+    public function coverageReport(Request $request): View
+    {
+        $filters = $request->validate([
+            'curriculum_version_id' => ['nullable', 'integer', 'exists:curriculum_versions,id'],
+            'student_group_id' => ['nullable', 'integer', 'exists:student_groups,id'],
+            'academic_year' => ['nullable', 'string', 'max:20'],
+            'semester_type' => ['nullable', 'in:winter,summer'],
+        ]);
+        $academicYear = $filters['academic_year'] ?? now()->year.'/'.(now()->year + 1);
+        $semesterType = $filters['semester_type'] ?? 'winter';
+        $curriculumVersionId = isset($filters['curriculum_version_id']) ? (int) $filters['curriculum_version_id'] : null;
+        $studentGroupId = isset($filters['student_group_id']) ? (int) $filters['student_group_id'] : null;
+
+        $rows = TeacherAssignment::query()
+            ->with(['teacher', 'subject', 'curriculumVersion.specialty', 'studentGroup.specialty', 'studentFlow.groups.specialty'])
+            ->where('semester', $semesterType)
+            ->where(fn ($query) => $query->whereNull('academic_year')->orWhere('academic_year', $academicYear))
+            ->when($curriculumVersionId !== null, fn ($query) => $query->where(function ($scope) use ($curriculumVersionId): void {
+                $scope->where('curriculum_version_id', $curriculumVersionId)
+                    ->orWhereHas('studentGroup', fn ($group) => $group->where('curriculum_version_id', $curriculumVersionId))
+                    ->orWhereHas('studentFlow.groups', fn ($group) => $group->where('curriculum_version_id', $curriculumVersionId));
+            }))
+            ->when($studentGroupId !== null, fn ($query) => $query->where(function ($scope) use ($studentGroupId): void {
+                $scope->where('student_group_id', $studentGroupId)
+                    ->orWhereHas('studentFlow.groups', fn ($group) => $group->whereKey($studentGroupId));
+            }))
+            ->get()
+            ->map(function (TeacherAssignment $assignment) use ($academicYear, $semesterType, $curriculumVersionId, $studentGroupId): array {
+                $coverageAliases = in_array($assignment->coverage_type, ['lecture', 'Лекции', 'лекции', 'Лекция', 'лекция'], true)
+                    ? ['lecture', 'Лекции', 'лекции', 'Лекция', 'лекция']
+                    : ['exercise', 'Упражнения', 'упражнения', 'Упражнение', 'упражнение'];
+                $entries = TimetableEntry::query()
+                    ->where('subject_id', $assignment->subject_id)
+                    ->where('teacher_id', $assignment->teacher_id)
+                    ->whereIn('coverage_type', $coverageAliases)
+                    ->where('academic_year', $academicYear)
+                    ->where('semester_type', $semesterType)
+                    ->where('is_in_pool', false)
+                    ->when($assignment->student_flow_id !== null, fn ($query) => $query->where('student_flow_id', $assignment->student_flow_id))
+                    ->when($assignment->student_group_id !== null, fn ($query) => $query->where('group_id', $assignment->student_group_id))
+                    ->when($assignment->student_flow_id === null && $assignment->student_group_id === null && $assignment->curriculum_version_id !== null, fn ($query) => $query
+                        ->whereHas('group', fn ($group) => $group
+                            ->where('curriculum_version_id', $assignment->curriculum_version_id)
+                            ->when($assignment->course_year !== null, fn ($course) => $course->where('course_year', $assignment->course_year))))
+                    ->when($studentGroupId !== null, fn ($query) => $query->where(function ($scope) use ($studentGroupId): void {
+                        $scope->where('group_id', $studentGroupId)
+                            ->orWhereHas('studentFlow.groups', fn ($group) => $group->whereKey($studentGroupId));
+                    }))
+                    ->when($curriculumVersionId !== null, fn ($query) => $query->where(function ($scope) use ($curriculumVersionId): void {
+                        $scope->whereHas('group', fn ($group) => $group->where('curriculum_version_id', $curriculumVersionId))
+                            ->orWhereHas('studentFlow.groups', fn ($group) => $group->where('curriculum_version_id', $curriculumVersionId));
+                    }))
+                    ->get(['duration_hours']);
+                $plannedHours = (int) ($assignment->planned_hours ?? 0);
+                $scheduledHours = (int) ($entries->sum('duration_hours') * 5);
+
+                return [
+                    'assignment' => $assignment,
+                    'planned_hours' => $plannedHours,
+                    'scheduled_hours' => $scheduledHours,
+                    'remaining_hours' => max(0, $plannedHours - $scheduledHours),
+                    'excess_hours' => max(0, $scheduledHours - $plannedHours),
+                    'sessions' => $entries->count(),
+                ];
+            });
+
+        return view('admin.coverage-report', [
+            'rows' => $rows,
+            'curriculumVersions' => CurriculumVersion::query()->with('specialty')->orderByDesc('version_year')->get(),
+            'groups' => StudentGroup::query()
+                ->with('specialty')
+                ->orderBy(Specialty::query()->select('name')->whereColumn('specialties.id', 'student_groups.specialty_id'))
+                ->orderBy('course_year')
+                ->orderBy('group_name')
+                ->get(),
+            'curriculumVersionId' => $curriculumVersionId,
+            'studentGroupId' => $studentGroupId,
+            'academicYear' => $academicYear,
+            'semesterType' => $semesterType,
         ]);
     }
 
@@ -251,6 +415,11 @@ class CatalogController extends Controller
             'course_year' => ['required', 'integer', 'between:1,6'],
             'semester_no' => ['required', 'integer', 'between:1,12'],
             'subject_category' => ['required', Rule::in(['mandatory', 'elective', 'optional'])],
+            'auditorium_hours' => ['nullable', 'integer', 'between:0,1000'],
+            'lecture_hours' => ['nullable', 'integer', 'between:0,1000'],
+            'exercise_hours' => ['nullable', 'integer', 'between:0,1000'],
+            'self_study_hours' => ['nullable', 'integer', 'between:0,1000'],
+            'control_type' => ['nullable', Rule::in(['И', 'ТО', 'П'])],
         ]);
         $categoryChanged = $curriculumSubject->subject_category !== $data['subject_category'];
         $data['is_selected'] = match (true) {
@@ -307,7 +476,11 @@ class CatalogController extends Controller
         ]);
         $data['group_name'] = filled($data['group_name'] ?? null) ? trim($data['group_name']) : null;
 
-        StudentGroup::query()->create($data);
+        DB::transaction(function () use ($data): void {
+            Specialty::query()->whereKey($data['specialty_id'])->lockForUpdate()->firstOrFail();
+            $this->assertUniqueGroup($data);
+            StudentGroup::query()->create($data);
+        });
 
         return $this->saved(
             isset($data['curriculum_version_id'])
@@ -320,12 +493,26 @@ class CatalogController extends Controller
     public function updateGroup(Request $request, StudentGroup $group): RedirectResponse
     {
         $data = $request->validate([
+            'curriculum_version_id' => [
+                'nullable',
+                'integer',
+                Rule::exists('curriculum_versions', 'id')->where('specialty_id', $group->specialty_id),
+            ],
             'group_name' => ['nullable', 'string', 'max:100'],
             'student_count' => ['required', 'integer', 'min:1', 'max:500'],
         ]);
         $data['group_name'] = filled($data['group_name'] ?? null) ? trim($data['group_name']) : null;
 
-        $group->update($data);
+        DB::transaction(function () use ($data, $group): void {
+            Specialty::query()->whereKey($group->specialty_id)->lockForUpdate()->firstOrFail();
+            $this->assertUniqueGroup([
+                'specialty_id' => $group->specialty_id,
+                'curriculum_version_id' => $data['curriculum_version_id'] ?? $group->curriculum_version_id,
+                'course_year' => $group->course_year,
+                'group_name' => $data['group_name'] ?? $group->group_name,
+            ], $group->id);
+            $group->update($data);
+        });
 
         return $this->saved('Данните за групата са обновени.', 'organization');
     }
@@ -338,16 +525,26 @@ class CatalogController extends Controller
         return $this->saved('Курсът и групата са изтрити заедно със свързаните занятия.', 'organization');
     }
 
+    public function destroyGroups(Request $request): RedirectResponse
+    {
+        $data = $request->validate([
+            'group_ids' => ['required', 'array', 'min:1'],
+            'group_ids.*' => ['required', 'integer', 'distinct', 'exists:student_groups,id'],
+        ]);
+
+        DB::transaction(function () use ($data): void {
+            StudentGroup::query()->whereKey($data['group_ids'])->get()->each->delete();
+            $this->deleteInvalidStudentFlows();
+        });
+
+        return $this->saved('Избраните курсове и групи са изтрити заедно със свързаните занятия.', 'organization');
+    }
+
     public function storeSubject(Request $request): RedirectResponse
     {
         $data = $request->validate([
             'code' => ['nullable', 'string', 'max:50'],
             'name' => ['required', 'string', 'max:255'],
-            'auditorium_hours' => ['required', 'integer', 'min:0', 'max:1000'],
-            'lecture_hours' => ['required', 'integer', 'min:0', 'max:1000'],
-            'exercise_hours' => ['required', 'integer', 'min:0', 'max:1000'],
-            'self_study_hours' => ['required', 'integer', 'min:0', 'max:1000'],
-            'control_type' => ['nullable', Rule::in(['И', 'ТО', 'П'])],
         ]);
 
         Subject::query()->create($data);
@@ -360,11 +557,6 @@ class CatalogController extends Controller
         $data = $request->validate([
             'code' => ['nullable', 'string', 'max:50'],
             'name' => ['required', 'string', 'max:255'],
-            'auditorium_hours' => ['required', 'integer', 'min:0', 'max:1000'],
-            'lecture_hours' => ['required', 'integer', 'min:0', 'max:1000'],
-            'exercise_hours' => ['required', 'integer', 'min:0', 'max:1000'],
-            'self_study_hours' => ['required', 'integer', 'min:0', 'max:1000'],
-            'control_type' => ['nullable', Rule::in(['И', 'ТО', 'П'])],
         ]);
 
         $subject->update($data);
@@ -385,6 +577,7 @@ class CatalogController extends Controller
             'first_name' => ['required', 'string', 'max:100'],
             'last_name' => ['required', 'string', 'max:100'],
             'title' => ['nullable', 'string', 'max:100'],
+            'department' => ['nullable', 'string', 'max:255'],
             'max_daily_hours' => ['required', 'integer', 'between:1,10'],
             'weekly_workload_hours' => ['required', 'integer', 'between:0,80'],
         ]);
@@ -531,7 +724,11 @@ class CatalogController extends Controller
      */
     private function assertFlowGroupsOfferSubject(array $groupIds, int $subjectId): void
     {
-        $eligibleGroupCount = StudentGroup::query()
+        $groups = StudentGroup::query()
+            ->with(['specialty', 'curriculumVersion'])
+            ->whereIn('id', $groupIds)
+            ->get();
+        $eligibleGroupIds = StudentGroup::query()
             ->whereIn('id', $groupIds)
             ->whereNotNull('curriculum_version_id')
             ->whereExists(function ($query) use ($subjectId): void {
@@ -541,11 +738,30 @@ class CatalogController extends Controller
                     ->whereColumn('curriculum_subjects.course_year', 'student_groups.course_year')
                     ->where('curriculum_subjects.subject_id', $subjectId);
             })
-            ->count();
+            ->pluck('id')
+            ->all();
 
-        if ($eligibleGroupCount !== count(array_unique($groupIds))) {
+        $groupsWithoutSubject = $groups->whereNotIn('id', $eligibleGroupIds);
+        if ($groupsWithoutSubject->isNotEmpty()) {
+            $subjectName = Subject::query()->whereKey($subjectId)->value('name');
+            $groupDetails = $groupsWithoutSubject
+                ->map(function (StudentGroup $group): string {
+                    $groupLabel = $group->specialty?->name ?? 'Специалност не е зададена';
+                    $groupLabel .= ' · '.$group->course_year.' курс';
+                    if ($group->group_name !== null && $group->group_name !== '') {
+                        $groupLabel .= ' · група '.$group->group_name;
+                    }
+
+                    $planLabel = $group->curriculumVersion === null
+                        ? 'няма зададен учебен план'
+                        : 'план „'.$group->curriculumVersion->name.'“ ('.$group->curriculumVersion->version_year.')';
+
+                    return $groupLabel.' — '.$planLabel;
+                })
+                ->implode('; ');
+
             throw ValidationException::withMessages([
-                'student_group_ids' => 'Все групи в потока трябва да имат тази дисциплина в учебния си план.',
+                'student_group_ids' => 'Всички групи в потока трябва да изучават дисциплината „'.$subjectName.'“. Тя не е включена в учебния план за: '.$groupDetails.'. Проверете избраните групи и учебни планове.',
             ]);
         }
     }
@@ -558,6 +774,36 @@ class CatalogController extends Controller
                     ->orWhereHas('groups', null, '<', 2);
             })
             ->delete();
+    }
+
+    /**
+     * @param  array{specialty_id:int|string, curriculum_version_id:int|string|null, course_year:int, group_name:string|null}  $data
+     */
+    private function assertUniqueGroup(array $data, ?int $exceptGroupId = null): void
+    {
+        $curriculumVersionId = $data['curriculum_version_id'] ?? null;
+        $groupName = $data['group_name'] ?? null;
+        $query = StudentGroup::query()
+            ->where('specialty_id', $data['specialty_id'])
+            ->where('course_year', $data['course_year'])
+            ->when(
+                $curriculumVersionId === null,
+                fn ($groups) => $groups->whereNull('curriculum_version_id'),
+                fn ($groups) => $groups->where('curriculum_version_id', $curriculumVersionId),
+            )
+            ->when(
+                $groupName === null,
+                fn ($groups) => $groups->whereNull('group_name'),
+                fn ($groups) => $groups->where('group_name', $groupName),
+            )
+            ->when($exceptGroupId !== null, fn ($groups) => $groups->whereKeyNot($exceptGroupId));
+
+        if ($query->exists()) {
+            $field = $groupName === null ? 'course_year' : 'group_name';
+            throw ValidationException::withMessages([
+                $field => 'Вече съществува курс/група със същата специалност, план, курс и име.',
+            ]);
+        }
     }
 
     public function storeTeacherAbsence(Request $request, Teacher $teacher): RedirectResponse
@@ -636,6 +882,13 @@ class CatalogController extends Controller
         return $this->saved('Данните за залата са обновени.', 'organization');
     }
 
+    public function destroyRoom(Room $room): RedirectResponse
+    {
+        $room->delete();
+
+        return $this->saved('Залата е изтрита. Занятията, които я използваха, остават без зададена зала.', 'organization');
+    }
+
     private function saved(string $message, string $tab = 'plans'): RedirectResponse
     {
         return redirect()->route('catalog.index', ['tab' => $tab])->with('status', $message);
@@ -665,7 +918,7 @@ class CatalogController extends Controller
         $periods = [];
 
         foreach (explode(';', $value) as $period) {
-            preg_match('/^([1-3])\/([1-5])\/(\d{2}:\d{2})-(\d{2}:\d{2})$/', $period, $matches);
+            preg_match('/^([1-3])\/([1-7])\/(\d{2}:\d{2})-(\d{2}:\d{2})$/', $period, $matches);
 
             if ($matches[3] >= $matches[4]) {
                 throw ValidationException::withMessages([

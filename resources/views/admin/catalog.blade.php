@@ -35,11 +35,19 @@
         .forms.single { grid-template-columns:1fr; }
         label { display:block; min-width:0; color:var(--muted); font-size:11px; font-weight:700; }
         input,select { display:block; width:100%; min-height:37px; margin-top:5px; padding:0 10px; border:1px solid var(--line); border-radius:8px; background:white; color:var(--ink); }
+        select.flow-groups-select { height:16rem; min-height:12rem; max-height:60vh; padding:8px; resize:vertical; }
         .span { grid-column:1/-1; }
         .help { margin-top:4px; color:#87928b; font-size:10px; }
         .list { padding:0 18px 14px; }
-        .list.three-columns { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:10px; }
+        .list.three-columns { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; }
         .list.three-columns>.item { min-width:0; padding:12px; border:1px solid var(--line); border-radius:10px; }
+        .teacher-directory { display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); gap:7px; }
+        .teacher-directory>.item { min-width:0; margin:0; padding:8px 10px; border:1px solid var(--line); border-radius:9px; }
+        .teacher-directory .record-link { margin:-5px; padding:5px; }
+        .teacher-directory .row-head { align-items:flex-start; gap:5px; }
+        .teacher-directory .row-head strong { font-size:11px; }
+        .teacher-directory .pill { flex:0 0 auto; padding:2px 6px; font-size:9px; }
+        .teacher-directory .muted { display:block; margin-top:4px; font-size:10px; line-height:1.3; }
         .item { padding:11px 0; border-top:1px solid var(--line); }
         .item:first-child { border-top:0; }
         .row-head strong { font-size:12px; }
@@ -60,6 +68,10 @@
         .record-editor>.record-summary .row-head { margin:0; }
         .record-editor>.record-summary>.muted { display:block; margin-top:4px; }
         .record-editor>.editor-panel { padding:10px 12px 12px; border-top:1px solid var(--line); }
+        .group-bulk-tools { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:10px; padding:12px 18px; border-bottom:1px solid var(--line); background:#fbfcfb; }
+        .group-bulk-tools form { margin:0; }
+        .group-select { display:flex; align-items:center; gap:8px; padding:8px 12px; }
+        .group-select input { width:16px; min-height:16px; margin:0; accent-color:var(--green); }
         .record-link { display:block; margin:-11px 0; padding:11px 0; border-radius:8px; }
         .record-link:hover { background:#f6f9f6; }
         .edit-form { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; padding-top:9px; }
@@ -69,24 +81,33 @@
         .tabnav { display:flex; flex-wrap:wrap; gap:8px; margin:0 0 16px; }
         .tabnav a { display:inline-flex; min-height:40px; align-items:center; padding:0 14px; border:1px solid var(--line); border-radius:10px; background:#fff; font-weight:700; }
         .tabnav a.active { border-color:var(--green); background:var(--soft); color:var(--green); }
-        @media(max-width:1200px) { .list.three-columns { grid-template-columns:repeat(3,minmax(0,1fr)); } }
         @media(max-width:850px) { .sections { grid-template-columns:1fr; } .sections>.card:only-child { grid-column:auto; } .card.wide { grid-column:auto; } .heading { align-items:start; flex-direction:column; } .list.three-columns { grid-template-columns:repeat(2,minmax(0,1fr)); } }
         @media(max-width:520px) { .forms,.edit-form,.list.three-columns { grid-template-columns:1fr; } .span { grid-column:auto; } .topbar { align-items:flex-start; } }
+        @media(max-width:1500px) { .teacher-directory { grid-template-columns:repeat(4,minmax(0,1fr)); } }
+        @media(max-width:1150px) { .teacher-directory { grid-template-columns:repeat(3,minmax(0,1fr)); } }
+        @media(max-width:850px) { .teacher-directory { grid-template-columns:repeat(2,minmax(0,1fr)); } }
+        @media(max-width:520px) { .teacher-directory { grid-template-columns:1fr; } }
     </style>
 </head>
 <body>
     <main class="shell">
         <header class="topbar">
             <a class="brand" href="{{ route('schedules.index') }}"><span class="mark">Ф</span><span>ФИИ · Учебно разписание</span></a>
-            <nav style="display:flex;gap:14px"><a href="{{ route('schedules.index') }}">Към разписанието</a><a href="{{ route('settings.index') }}">Общи настройки</a></nav>
+            <nav style="display:flex;gap:14px">
+                @unless($isDepartmentHead)
+                    <a href="{{ route('schedules.index') }}">Към разписанието</a><a href="{{ route('catalog.coverage-report') }}">Сверка на възлаганията</a><a href="{{ route('settings.index') }}">Общи настройки</a>
+                @endunless
+            </nav>
         </header>
         <section class="heading">
             <div>
-                <div class="eyebrow">Администрация · Базови данни</div>
-                <h1>Учебен каталог</h1>
-                <p class="lede">Управлявайте специалности, версии на планове, дисциплини, групи, преподаватели и зали.</p>
+                <div class="eyebrow">{{ $isDepartmentHead ? 'Катедра · Преподаватели' : 'Администрация · Базови данни' }}</div>
+                <h1>{{ $isDepartmentHead ? 'Преподаватели в катедрата' : 'Учебен каталог' }}</h1>
+                <p class="lede">{{ $isDepartmentHead ? 'Достъп за ' . $teacherDepartmentFilter . ' · преглед на преподаватели и разписанийни натоварвания.' : 'Управлявайте специалности, версии на планове, дисциплини, групи, преподаватели и зали.' }}</p>
             </div>
-            <a class="button primary" href="{{ route('imports.index') }}">Импорт на учебни данни</a>
+            @unless($isDepartmentHead)
+                <a class="button primary" href="{{ route('imports.index') }}">Импорт на учебни данни</a>
+            @endunless
         </section>
 
         @if(session('status'))
@@ -100,7 +121,7 @@
         @endif
 
         <nav class="tabnav" aria-label="Секции на учебния каталог">
-            @foreach(['plans' => 'Учебни планове', 'subjects' => 'Дисциплини', 'teachers' => 'Преподаватели', 'organization' => 'Курс и групи'] as $tab => $label)
+            @foreach(($isDepartmentHead ? ['teachers' => 'Преподаватели'] : ['plans' => 'Учебни планове', 'subjects' => 'Дисциплини', 'teachers' => 'Преподаватели', 'organization' => 'Курс и групи']) as $tab => $label)
                 <a href="{{ route('catalog.index', ['tab' => $tab]) }}" @if($activeTab === $tab) class="active" aria-current="page" @endif>{{ $label }}</a>
             @endforeach
         </nav>
@@ -116,7 +137,7 @@
                     <label>ОКС<input name="degree" value="{{ old('degree') }}" placeholder="Бакалавър"></label>
                     <button class="button primary span" type="submit">Добави специалност</button>
                 </form>
-                <div class="list">
+                <div class="list three-columns">
                     @forelse($specialties as $specialty)
                         <details class="item record-editor">
                             <summary class="record-summary">
@@ -185,26 +206,44 @@
                     <label class="span">Брой студенти<input name="student_count" type="number" min="1" value="20" required></label>
                     <button class="button primary span" type="submit">Добави група</button>
                 </form>
+                <div class="group-bulk-tools">
+                    <form id="bulk-delete-groups" method="POST" action="{{ route('catalog.groups.bulk-destroy') }}" onsubmit="return confirm('Изтриването ще премахне разписанията и историята на избраните курсове/групи. Продължаване?')">
+                        @csrf @method('DELETE')
+                        <button class="button" type="submit" style="color:#a83232">Изтрий избраните</button>
+                    </form>
+                    <label class="group-select"><input id="select-all-groups" type="checkbox">Избери всички групи</label>
+                </div>
                 <div class="list">
                     @forelse($groups as $group)
-                        <details class="item record-editor">
-                            <summary class="record-summary">
-                                <span class="row-head"><strong>{{ $group->specialty->name }} · {{ $group->display_name }}</strong><span class="muted">{{ $group->student_count }} студенти</span></span>
-                                <span class="muted">План: {{ $group->curriculumVersion?->name ?? 'Няма зададен' }}</span>
-                            </summary>
-                            <div class="editor-panel">
-                                <form class="edit-form" method="POST" action="{{ route('catalog.groups.update', $group) }}">
-                                    @csrf @method('PATCH')
-                                    <label>Група <span class="help">(по избор)</span><input name="group_name" value="{{ $group->group_name }}"></label>
-                                    <label>Студенти<input name="student_count" type="number" min="1" max="500" value="{{ $group->student_count }}" required></label>
-                                    <button class="button" type="submit">Запази</button>
-                                </form>
-                                <form method="POST" action="{{ route('catalog.groups.destroy', $group) }}" onsubmit="return confirm('Изтриването ще премахне занятията и историята на този курс/група. Продължаване?')">
-                                    @csrf @method('DELETE')
-                                    <button class="button" type="submit" style="color:#a83232">Изтрий курс/група</button>
-                                </form>
-                            </div>
-                        </details>
+                        <div class="item group-item">
+                            <label class="group-select"><input class="group-select-checkbox" type="checkbox" name="group_ids[]" value="{{ $group->id }}" form="bulk-delete-groups"><span>Избери</span></label>
+                            <details class="record-editor">
+                                <summary class="record-summary">
+                                    <span class="row-head"><strong>{{ $group->specialty->name }} · {{ $group->display_name }}</strong><span class="muted">{{ $group->student_count }} студенти</span></span>
+                                    <span class="muted">План: {{ $group->curriculumVersion?->name ?? 'Няма зададен' }}</span>
+                                </summary>
+                                <div class="editor-panel">
+                                    <form class="edit-form" method="POST" action="{{ route('catalog.groups.update', $group) }}">
+                                        @csrf @method('PATCH')
+                                        <label class="span">Версия на учебния план
+                                            <select name="curriculum_version_id">
+                                                <option value="">Без учебен план</option>
+                                                @foreach($curriculumVersions->where('specialty_id', $group->specialty_id) as $version)
+                                                    <option value="{{ $version->id }}" @selected($group->curriculum_version_id === $version->id)>{{ $version->name }} · {{ $version->version_year }}</option>
+                                                @endforeach
+                                            </select>
+                                        </label>
+                                        <label>Група <span class="help">(по избор)</span><input name="group_name" value="{{ $group->group_name }}"></label>
+                                        <label>Студенти<input name="student_count" type="number" min="1" max="500" value="{{ $group->student_count }}" required></label>
+                                        <button class="button" type="submit">Запази</button>
+                                    </form>
+                                    <form method="POST" action="{{ route('catalog.groups.destroy', $group) }}" onsubmit="return confirm('Изтриването ще премахне занятията и историята на този курс/група. Продължаване?')">
+                                        @csrf @method('DELETE')
+                                        <button class="button" type="submit" style="color:#a83232">Изтрий курс/група</button>
+                                    </form>
+                                </div>
+                            </details>
+                        </div>
                     @empty
                         <div class="empty">Няма добавени групи.</div>
                     @endforelse
@@ -215,24 +254,24 @@
             @if($activeTab === 'organization')
             <section class="card">
                 <div class="section-head"><div><h2>Потоци по дисциплина</h2><p>Една обща лекционна дисциплина за курсове от различни специалности и учебни планове; часът се споделя при генериране.</p></div><span class="pill">{{ $studentFlows->count() }}</span></div>
-                <form class="forms" method="POST" action="{{ route('catalog.student-flows.store') }}">
+                <form class="forms" id="student-flow-create-form" method="POST" action="{{ route('catalog.student-flows.store') }}">
                     @csrf
-                    <label class="span">Име на потока<input name="name" required maxlength="255" placeholder="Поток 1 · Лекции"></label>
+                    <label class="span">Име на потока<input name="name" required maxlength="255" placeholder="Попълва се след избор на дисциплина"></label>
                     <label class="span">Обща лекционна дисциплина
-                        <select name="subject_id" required>
+                        <select name="subject_id" class="flow-subject-select" required>
                             <option value="">Изберете дисциплина</option>
                             @foreach($subjects as $subject)
-                                <option value="{{ $subject->id }}">{{ $subject->code }} · {{ $subject->name }}</option>
+                                <option value="{{ $subject->id }}" data-flow-name="{{ $subject->name }} - поток">{{ $subject->code }} · {{ $subject->name }}</option>
                             @endforeach
                         </select>
                     </label>
                     <label class="span">Групи в потока
-                        <select name="student_group_ids[]" multiple size="5" required>
+                        <select class="flow-groups-select" name="student_group_ids[]" multiple size="10" required>
                             @foreach($groups as $group)
-                                <option value="{{ $group->id }}">{{ $group->specialty->name }} · {{ $group->display_name }}</option>
+                                <option value="{{ $group->id }}" data-subject-ids="{{ $group->curriculumVersion?->subjects->where('course_year', $group->course_year)->pluck('subject_id')->join(',') }}">{{ $group->specialty->name }} · {{ $group->display_name }}</option>
                             @endforeach
                         </select>
-                        <span class="help">Изберете поне две групи, които посещават общите лекции.</span>
+                        <span class="help" id="flow-group-suggestion" aria-live="polite">Изберете дисциплина, за да маркирате автоматично групите, които я изучават.</span>
                     </label>
                     <button class="button primary span" type="submit">Създай поток</button>
                 </form>
@@ -248,7 +287,7 @@
                                     @csrf @method('PATCH')
                                     <label class="span">Име<input name="name" value="{{ $flow->name }}" required maxlength="255"></label>
                                     <label class="span">Дисциплина
-                                        <select name="subject_id" required>
+                                        <select name="subject_id" class="flow-subject-select" required>
                                             <option value="">Изберете дисциплина</option>
                                             @foreach($subjects as $subject)
                                                 <option value="{{ $subject->id }}" @selected($flow->subject_id === $subject->id)>{{ $subject->code }} · {{ $subject->name }}</option>
@@ -256,9 +295,9 @@
                                         </select>
                                     </label>
                                     <label class="span">Групи
-                                        <select name="student_group_ids[]" multiple size="5" required>
+                                        <select class="flow-groups-select" name="student_group_ids[]" multiple size="10" required>
                                             @foreach($groups as $group)
-                                                <option value="{{ $group->id }}" @selected($flow->groups->contains('id', $group->id))>{{ $group->specialty->name }} · {{ $group->display_name }}</option>
+                                                <option value="{{ $group->id }}" data-subject-ids="{{ $group->curriculumVersion?->subjects->where('course_year', $group->course_year)->pluck('subject_id')->join(',') }}" @selected($flow->groups->contains('id', $group->id))>{{ $group->specialty->name }} · {{ $group->display_name }}</option>
                                             @endforeach
                                         </select>
                                     </label>
@@ -279,16 +318,11 @@
 
             @if($activeTab === 'subjects')
             <section class="card">
-                <div class="section-head"><div><h2>Дисциплини</h2><p>АЗ, лекции, упражнения, самоподготовка и форма на контрол</p></div><span class="pill">{{ $subjects->count() }}</span></div>
+                <div class="section-head"><div><h2>Дисциплини</h2><p>Общият каталог съдържа код и наименование; учебните данни се поддържат във версията на плана.</p></div><span class="pill">{{ $subjects->count() }}</span></div>
                 <form class="forms" method="POST" action="{{ route('catalog.subjects.store') }}">
                     @csrf
                     <label>Код<input name="code" maxlength="50"></label>
                     <label>Наименование<input name="name" required></label>
-                    <label>АЗ · аудиторна заетост<input name="auditorium_hours" type="number" min="0" max="1000" value="0" required></label>
-                    <label>Л · лекции<input name="lecture_hours" type="number" min="0" max="1000" value="0" required></label>
-                    <label>У · упражнения<input name="exercise_hours" type="number" min="0" max="1000" value="0" required></label>
-                    <label>Самоподготовка<input name="self_study_hours" type="number" min="0" max="1000" value="0" required></label>
-                    <label>Форма на контрол<select name="control_type"><option value="">Не е зададена</option><option value="И">Изпит (И)</option><option value="ТО">Текущ контрол (ТО)</option><option value="П">Продължаваща дисциплина (П)</option></select></label>
                     <button class="button primary span" type="submit">Добави дисциплина</button>
                 </form>
                 <form class="catalog-list-tools subject-filters" method="GET" action="{{ route('catalog.index') }}">
@@ -304,7 +338,7 @@
                     <label>Сортиране
                         <select name="subject_sort" onchange="this.form.submit()">
                             <option value="name" @selected($subjectSort === 'name')>По азбучен ред</option>
-                            <option value="auditorium_hours" @selected($subjectSort === 'auditorium_hours')>По АЗ · низходящо</option>
+                            <option value="auditorium_hours" @selected($subjectSort === 'auditorium_hours')>По най-голям АЗ в план · низходящо</option>
                             <option value="code" @selected($subjectSort === 'code')>По код</option>
                         </select>
                     </label>
@@ -318,25 +352,35 @@
                     <noscript><button class="button" type="submit">Приложи</button></noscript>
                 </form>
                 @php
-                    $subjectsWithSelfStudy = $subjects->filter(fn ($subject): bool => (int) $subject->self_study_hours > 0);
+                    $subjectsWithSelfStudy = $subjects->flatMap(fn ($subject) => $subject->curriculumSubjects
+                        ->map(function ($curriculumSubject) use ($subject): ?array {
+                            $hours = (int) ($curriculumSubject->self_study_hours ?? 0);
+
+                            return $hours > 0
+                                ? ['subject' => $subject, 'curriculum_subject' => $curriculumSubject, 'hours' => $hours]
+                                : null;
+                        }))
+                        ->filter()
+                        ->values();
                 @endphp
                 <section class="item" aria-labelledby="self-study-report">
                     <div class="row-head">
-                        <strong id="self-study-report">Справка: дисциплини със самоподготовка</strong>
+                        <strong id="self-study-report">Справка: самоподготовка по версия на учебния план</strong>
                         <span class="pill">{{ $subjectsWithSelfStudy->count() }}</span>
                     </div>
                     <div class="table-wrap">
                         <table>
-                            <thead><tr><th>Код</th><th>Дисциплина</th><th>Самоподготовка</th></tr></thead>
+                            <thead><tr><th>План / семестър</th><th>Код</th><th>Дисциплина</th><th>Самоподготовка</th></tr></thead>
                             <tbody>
-                                @forelse($subjectsWithSelfStudy as $subject)
+                                @forelse($subjectsWithSelfStudy as $row)
                                     <tr>
-                                        <td>{{ $subject->code ?: '—' }}</td>
-                                        <td>{{ $subject->name }}</td>
-                                        <td>{{ $subject->self_study_hours }} ч.</td>
+                                        <td>{{ $row['curriculum_subject']->curriculumVersion?->specialty?->name }} · {{ $row['curriculum_subject']->curriculumVersion?->name }} · семестър {{ $row['curriculum_subject']->semester_no }}</td>
+                                        <td>{{ $row['subject']->code ?: '—' }}</td>
+                                        <td>{{ $row['subject']->name }}</td>
+                                        <td>{{ $row['hours'] }} ч.</td>
                                     </tr>
                                 @empty
-                                    <tr><td colspan="3" class="empty">Няма дисциплини със зададени часове самоподготовка.</td></tr>
+                                    <tr><td colspan="4" class="empty">Няма дисциплини със зададени часове самоподготовка.</td></tr>
                                 @endforelse
                             </tbody>
                         </table>
@@ -347,18 +391,21 @@
                         <details class="item record-editor" id="subject-{{ $subject->id }}" @if((int) request('subject_id') === $subject->id) open @endif>
                             <summary class="record-summary">
                                 <span class="row-head"><strong>{{ $subject->name }}</strong><span class="muted">{{ $subject->code }}</span></span>
-                                <span class="muted">АЗ {{ $subject->auditorium_hours }} · Л {{ $subject->lecture_hours }} · У {{ $subject->exercise_hours }} · самоподготовка {{ $subject->self_study_hours }} · контрол {{ $subject->control_type ?: '—' }} · {{ $subject->curriculum_subjects_count }} включвания в планове</span>
+                                @forelse($subject->curriculumSubjects->when($subjectPlanId > 0, fn ($rows) => $rows->where('curriculum_version_id', $subjectPlanId)) as $curriculumSubject)
+                                    <span class="muted">
+                                        {{ $curriculumSubject->curriculumVersion?->specialty?->name }} · {{ $curriculumSubject->curriculumVersion?->name }} · {{ $curriculumSubject->course_year }} курс · семестър {{ $curriculumSubject->semester_no }}
+                                    </span>
+                                @empty
+                                    <span class="muted">Не е включена в учебен план</span>
+                                @endforelse
+                                <span class="muted">{{ $subject->curriculum_subjects_count }} включвания в планове</span>
                             </summary>
                             <div class="editor-panel">
                                 <form class="edit-form" method="POST" action="{{ route('catalog.subjects.update', $subject) }}">
                                     @csrf @method('PATCH')
+                                    <p class="help span">АЗ, лекциите, упражненията, самоподготовката и формата на контрол се редактират във версията на учебния план.</p>
                                     <label>Код<input name="code" value="{{ $subject->code }}"></label>
                                     <label>Наименование<input name="name" value="{{ $subject->name }}" required></label>
-                                    <label>АЗ<input name="auditorium_hours" type="number" min="0" max="1000" value="{{ $subject->auditorium_hours }}" required></label>
-                                    <label>Лекции<input name="lecture_hours" type="number" min="0" max="1000" value="{{ $subject->lecture_hours }}" required></label>
-                                    <label>Упражнения<input name="exercise_hours" type="number" min="0" max="1000" value="{{ $subject->exercise_hours }}" required></label>
-                                    <label>Самоподготовка<input name="self_study_hours" type="number" min="0" max="1000" value="{{ $subject->self_study_hours }}" required></label>
-                                    <label>Контрол<select name="control_type"><option value="" @selected(!$subject->control_type)>Не е зададен</option><option value="И" @selected($subject->control_type === 'И')>Изпит (И)</option><option value="ТО" @selected($subject->control_type === 'ТО')>Текущ контрол (ТО)</option><option value="П" @selected($subject->control_type === 'П')>Продължаваща дисциплина (П)</option></select></label>
                                     <button class="button" type="submit">Запази</button>
                                 </form>
                                 <form method="POST" action="{{ route('catalog.subjects.destroy', $subject) }}" onsubmit="return confirm('Изтриването премахва дисциплината от всички учебни планове, потоци и разписания. Продължаване?')">
@@ -379,33 +426,59 @@
                 <div class="section-head">
                     <div>
                         <h2>Преподаватели</h2>
-                        <p>Отворете досието за редакция, предпочитани дни и обезпеченост ·
+                        <p>{{ $isDepartmentHead ? 'Преглед на досиета и поставени часове · ' : 'Отворете досието за редакция, предпочитани дни и обезпеченост · ' }}
                             @if($teacherPlanId) {{ $teachers->count() }} преподаватели по избрания план.
-                            @else {{ $teachers->count() }} общо, показани без пагинация. @endif
+                            @else {{ $teachers->count() }} {{ $isDepartmentHead ? 'в катедрата.' : 'общо, показани без пагинация.' }} @endif
                         </p>
                     </div>
-                    <a class="button primary" href="{{ route('catalog.teachers.create') }}">Добави преподавател</a>
+                    @unless($isDepartmentHead)
+                        <a class="button primary" href="{{ route('catalog.teachers.create') }}">Добави преподавател</a>
+                    @endunless
                 </div>
                 <form class="catalog-list-tools subject-filters" method="GET" action="{{ route('catalog.index') }}">
                     <input type="hidden" name="tab" value="teachers">
-                    <label>Преподаватели по учебен план
-                        <select name="teacher_plan_id" onchange="this.form.submit()">
-                            <option value="">Всички планове</option>
-                            @foreach($curriculumVersions as $version)
-                                <option value="{{ $version->id }}" @selected($teacherPlanId === $version->id)>{{ $version->specialty->name }} · {{ $version->name }}</option>
-                            @endforeach
-                        </select>
-                    </label>
-                    @if($teacherPlanId)
-                        <a class="button" href="{{ route('catalog.index', ['tab' => 'teachers']) }}">Изчисти</a>
+                    @if($isDepartmentHead)
+                        <p class="muted">Катедра: <strong>{{ $teacherDepartmentFilter }}</strong></p>
+                    @else
+                        <label>Катедра
+                            <select name="teacher_department" onchange="this.form.submit()">
+                                <option value="">Всички катедри</option>
+                                @foreach($teacherDepartments as $department)
+                                    <option value="{{ $department }}" @selected($teacherDepartmentFilter === $department)>{{ $department }}</option>
+                                @endforeach
+                            </select>
+                        </label>
+                        <label>Преподаватели по учебен план
+                            <select name="teacher_plan_id" onchange="this.form.submit()">
+                                <option value="">Всички планове</option>
+                                @foreach($curriculumVersions as $version)
+                                    <option value="{{ $version->id }}" @selected($teacherPlanId === $version->id)>{{ $version->specialty->name }} · {{ $version->name }}</option>
+                                @endforeach
+                            </select>
+                        </label>
+                        @if($teacherPlanId || $teacherDepartmentFilter)
+                            <a class="button" href="{{ route('catalog.index', ['tab' => 'teachers']) }}">Изчисти</a>
+                        @endif
                     @endif
                 </form>
-                <div class="list three-columns">
+                @unless($isDepartmentHead)
+                    <details class="item" style="margin:12px 18px">
+                        <summary class="record-summary"><strong>Достъп на ръководители катедри</strong><span class="muted">Назначете акаунт и катедра</span></summary>
+                        <form class="edit-form" method="POST" action="{{ route('catalog.department-head.update') }}" style="padding:14px">
+                            @csrf @method('PATCH')
+                            <label>Потребител<select name="user_id" required>@foreach($users as $user)<option value="{{ $user->id }}">{{ $user->name }} · {{ $user->email }}{{ $user->hasRole('department_head') ? ' · ръководител' : '' }}</option>@endforeach</select></label>
+                            <label>Достъп<select name="is_department_head"><option value="1">Ръководител катедра</option><option value="0">Без роля ръководител</option></select></label>
+                            <label class="span">Катедра<select name="department"><option value="">Изберете катедра</option>@foreach($teacherDepartments as $department)<option value="{{ $department }}">{{ $department }}</option>@endforeach</select></label>
+                            <button class="button" type="submit">Запази достъпа</button>
+                        </form>
+                    </details>
+                @endunless
+                <div class="list teacher-directory">
                     @forelse($teachers as $teacher)
                         <article class="item">
                             <a class="record-link" href="{{ route('catalog.teachers.show', $teacher) }}">
                                 <span class="row-head"><strong>{{ $teacher->title }} {{ $teacher->first_name }} {{ $teacher->last_name }}</strong><span class="pill {{ $teacher->active ? '' : 'off' }}">{{ $teacher->active ? 'Активен' : 'Неактивен' }}</span></span>
-                                <span class="muted">До {{ $teacher->max_daily_hours }} ч./ден · {{ $teacher->weekly_workload_hours }} ч./седмица · {{ $teacher->assignments_count }} дисциплини</span>
+                                <span class="muted">{{ $teacher->department ?: 'Катедра не е зададена' }} · До {{ $teacher->max_daily_hours }} ч./ден · {{ $teacher->weekly_workload_hours }} ч./седмица · {{ $teacher->assignments_count }} дисциплини</span>
                             </a>
                         </article>
                     @empty
@@ -448,6 +521,10 @@
                                     <label>Активност<select name="is_active"><option value="1" @selected($room->is_active)>Активна</option><option value="0" @selected(!$room->is_active)>Неактивна</option></select></label>
                                     <button class="button" type="submit">Запази</button>
                                 </form>
+                                <form method="POST" action="{{ route('catalog.rooms.destroy', $room) }}" onsubmit="return confirm('Изтриването ще премахне залата от всички занятия, които я използват. Продължаване?')">
+                                    @csrf @method('DELETE')
+                                    <button class="button" type="submit" style="color:#a83232">Изтрий залата</button>
+                                </form>
                             </div>
                         </details>
                     @empty
@@ -468,6 +545,23 @@
         @media(max-width:520px) { .catalog-list-tools { align-items:stretch; flex-direction:column; } }
     </style>
     <script>
+        const selectAllGroups = document.getElementById('select-all-groups');
+        if (selectAllGroups) {
+            const groupCheckboxes = Array.from(document.querySelectorAll('.group-select-checkbox'));
+            const updateSelectAll = () => {
+                const selectedCount = groupCheckboxes.filter((checkbox) => checkbox.checked).length;
+                selectAllGroups.checked = selectedCount > 0 && selectedCount === groupCheckboxes.length;
+                selectAllGroups.indeterminate = selectedCount > 0 && selectedCount < groupCheckboxes.length;
+            };
+
+            selectAllGroups.addEventListener('change', () => {
+                groupCheckboxes.forEach((checkbox) => {
+                    checkbox.checked = selectAllGroups.checked;
+                });
+            });
+            groupCheckboxes.forEach((checkbox) => checkbox.addEventListener('change', updateSelectAll));
+        }
+
         document.querySelectorAll('.card .list').forEach((list) => {
             const items = Array.from(list.querySelectorAll(':scope > .item'));
             if (items.length === 0) {
@@ -495,6 +589,41 @@
             list.before(tools);
             update();
         });
+
+        const flowCreateForm = document.getElementById('student-flow-create-form');
+        if (flowCreateForm) {
+            const subjectSelect = flowCreateForm.querySelector('.flow-subject-select');
+            const nameInput = flowCreateForm.querySelector('input[name="name"]');
+            const groupsSelect = flowCreateForm.querySelector('.flow-groups-select');
+            const groupSuggestion = document.getElementById('flow-group-suggestion');
+            let manuallyEditedName = false;
+
+            nameInput.addEventListener('input', () => {
+                manuallyEditedName = true;
+            });
+
+            subjectSelect.addEventListener('change', () => {
+                const subjectOption = subjectSelect.selectedOptions[0];
+                const subjectId = subjectSelect.value;
+                const eligibleGroups = [];
+
+                Array.from(groupsSelect.options).forEach((option) => {
+                    const subjectIds = option.dataset.subjectIds.split(',').filter(Boolean);
+                    const isEligible = subjectId !== '' && subjectIds.includes(subjectId);
+                    option.disabled = !isEligible;
+                    option.selected = isEligible;
+                    if (isEligible) eligibleGroups.push(option);
+                });
+
+                if (!manuallyEditedName && subjectOption?.dataset.flowName) {
+                    nameInput.value = subjectOption.dataset.flowName;
+                }
+
+                groupSuggestion.textContent = subjectId === ''
+                    ? 'Изберете дисциплина, за да маркирате автоматично групите, които я изучават.'
+                    : `Маркирани са всички групи с тази дисциплина в плана си (${eligibleGroups.length}).`;
+            });
+        }
     </script>
 </body>
 </html>

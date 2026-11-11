@@ -30,7 +30,7 @@ class CatalogDetailsController extends Controller
             ->orderBy('subject_id')
             ->get();
         $assignments = TeacherAssignment::query()
-            ->with(['teacher', 'studentFlow.groups', 'studentFlow.subject'])
+            ->with(['teacher', 'studentGroup', 'studentFlow.groups', 'studentFlow.subject'])
             ->where(function ($query) use ($curriculumVersion): void {
                 $query->where('curriculum_version_id', $curriculumVersion->id)
                     ->orWhereHas('studentGroup', fn ($groups) => $groups
@@ -51,6 +51,12 @@ class CatalogDetailsController extends Controller
 
     public function teacher(Teacher $teacher): View
     {
+        $user = auth()->user();
+        $isDepartmentHead = $user?->hasRole('department_head') && ! $user->hasRole('admin');
+        if ($isDepartmentHead) {
+            abort_unless(filled($user->department) && $teacher->department === $user->department, 403);
+        }
+
         $teacher->load(['dayPreferences', 'absences']);
         $assignments = TeacherAssignment::query()
             ->with(['subject', 'curriculumVersion.specialty', 'studentFlow.subject', 'studentGroup.specialty'])
@@ -100,6 +106,7 @@ class CatalogDetailsController extends Controller
             'curriculumSubjects',
             'studentFlows',
             'teacherScheduleLoads',
+            'isDepartmentHead',
         ));
     }
 

@@ -139,6 +139,9 @@
                             @endforeach
                         </nav>
                     </header>
+                    @foreach($scheduleNotes as $scheduleNote)
+                        <p class="notice"><strong>{{ $scheduleNote->group?->display_name }}:</strong> {{ $scheduleNote->note }}</p>
+                    @endforeach
                     <p class="mobile-note">Плъзнете таблицата настрани, за да видите всички дни.</p>
                     <div class="grid-wrap">
                         <table>

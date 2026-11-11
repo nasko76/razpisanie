@@ -1,12 +1,18 @@
 <?php
 
+use App\Models\CurriculumSubject;
 use App\Models\CurriculumVersion;
 use App\Models\Specialty;
 use App\Models\StudentGroup;
 use App\Models\Subject;
 use App\Models\Teacher;
+use App\Models\TimetableEntry;
 use App\Models\User;
+use App\Services\ScheduleService;
+use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Http\UploadedFile;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 use Spatie\Permission\Models\Role;
 
 function createStudyImportVersion(): CurriculumVersion
@@ -177,6 +183,7 @@ function planAzHtml(
     string $teacherName = 'Доцент д-р Иван Иванов',
     string $specialtyName = 'Изобразително изкуство - ССО',
     ?array $rows = null,
+    ?string $departmentName = null,
 ): string {
     $rows ??= [['Рисуване', $specialtyName, '1', '1', '1', 'Л', '30', '24']];
     $htmlRows = implode('', array_map(
@@ -184,7 +191,9 @@ function planAzHtml(
         $rows,
     ));
 
-    return '<!doctype html><html lang="bg"><meta charset="utf-8"><p>'.$teacherName.' · Възложен и редуциран: 120</p>'
+    return '<!doctype html><html lang="bg"><meta charset="utf-8">'
+        .($departmentName !== null ? '<div>Катедра „'.$departmentName.'“</div>' : '')
+        .'<p>'.$teacherName.' · Възложен и редуциран: 120</p>'
         .'<table><tr><th>Дисциплина</th><th>Специалност</th><th>Курс</th><th>Сем.</th><th>Гр.</th><th>Л/У</th><th>Пл.ч.</th><th>Брой студ.</th></tr>'
         .$htmlRows.'</table></html>';
 }
@@ -243,13 +252,6 @@ it('previews and confirms curriculum rows while retaining source columns and mis
         'semester_no' => 1,
         'course_year' => 1,
     ]);
-    $subject->refresh();
-    expect($subject->auditorium_hours)->toBe(60)
-        ->and($subject->lecture_hours)->toBe(0)
-        ->and($subject->exercise_hours)->toBe(0)
-        ->and($subject->self_study_hours)->toBe(30)
-        ->and($subject->control_type)->toBe('И');
-
     $sourceData = $subject->curriculumSubjects()->firstOrFail()->source_data;
     expect($sourceData['columns']['Кредити'])->toBe('5')
         ->and($preview['rows'][0]['warnings'])->toContain(
@@ -257,7 +259,12 @@ it('previews and confirms curriculum rows while retaining source columns and mis
         );
     $curriculumSubject = $version->subjects()->firstOrFail();
     expect($curriculumSubject->subject_category)->toBe('mandatory')
-        ->and($curriculumSubject->is_selected)->toBeTrue();
+        ->and($curriculumSubject->is_selected)->toBeTrue()
+        ->and($curriculumSubject->auditorium_hours)->toBe(60)
+        ->and($curriculumSubject->lecture_hours)->toBe(0)
+        ->and($curriculumSubject->exercise_hours)->toBe(0)
+        ->and($curriculumSubject->self_study_hours)->toBe(30)
+        ->and($curriculumSubject->control_type)->toBe('И');
 });
 
 it('marks elective curriculum rows and skips elective rows without auditorium hours by default', function () {
@@ -403,9 +410,16 @@ it('maps identified study-plan fields and preserves the remaining 24-column sour
     ])->assertRedirect(route('catalog.index'));
 
     $subject = Subject::query()->firstOrFail();
-    expect($subject->auditorium_hours)->toBe(48)
-        ->and($subject->lecture_hours)->toBe(30)
-        ->and($subject->exercise_hours)->toBe(18);
+    $curriculumSubject = $version->subjects()->firstOrFail();
+    expect($curriculumSubject->auditorium_hours)->toBe(48)
+        ->and($curriculumSubject->lecture_hours)->toBe(30)
+        ->and($curriculumSubject->exercise_hours)->toBe(18);
+
+    $this->get(route('catalog.curriculum-versions.show', $version))
+        ->assertOk()
+        ->assertSee('48')
+        ->assertSee('30')
+        ->assertSee('18');
 });
 
 it('discovers and imports the saved university plan table with abbreviated headers', function () {
@@ -441,8 +455,8 @@ it('discovers and imports the saved university plan table with abbreviated heade
         'semester_no' => 3,
         'course_year' => 2,
     ]);
-    expect(Subject::query()->firstOrFail()->auditorium_hours)->toBe(48)
-        ->and(Subject::query()->firstOrFail()->control_type)->toBe('И');
+    expect($version->subjects()->firstOrFail()->auditorium_hours)->toBe(48)
+        ->and($version->subjects()->firstOrFail()->control_type)->toBe('И');
     $this->assertDatabaseCount('subjects', 1);
     $this->assertDatabaseCount('curriculum_subjects', 1);
 });
@@ -459,7 +473,6 @@ it('does not duplicate curriculum records when the same file is imported again',
     ])->assertRedirect();
 
     $subjectId = (string) Subject::query()->value('id');
-    Subject::query()->firstOrFail()->update(['control_type' => 'ТО']);
     $second = submitStudyImportPreview('curriculum', $version, curriculumHtml())->assertOk();
     expect($second->viewData('preview')['rows'][0]['status'])->toBe('already_imported');
     $this->post(route('imports.confirm'), [
@@ -469,7 +482,88 @@ it('does not duplicate curriculum records when the same file is imported again',
 
     $this->assertDatabaseCount('subjects', 1);
     $this->assertDatabaseCount('curriculum_subjects', 1);
-    expect(Subject::query()->firstOrFail()->control_type)->toBe('И');
+    expect($version->subjects()->firstOrFail()->control_type)->toBe('И');
+});
+
+it('keeps discipline workload values separate between curriculum versions', function () {
+    $version = createStudyImportVersion();
+    $otherVersion = $version->replicate();
+    $otherVersion->name = 'Учебен план 2027';
+    $otherVersion->version_year = 2027;
+    $otherVersion->save();
+    $subject = Subject::query()->create([
+        'code' => 'ART-101',
+        'name' => 'Рисуване',
+    ]);
+
+    $firstPlanSubject = CurriculumSubject::query()->create([
+        'curriculum_version_id' => $version->id,
+        'subject_id' => $subject->id,
+        'semester_no' => 1,
+        'course_year' => 1,
+        'auditorium_hours' => 60,
+        'lecture_hours' => 40,
+        'exercise_hours' => 20,
+        'self_study_hours' => 10,
+        'control_type' => 'И',
+    ]);
+    $secondPlanSubject = CurriculumSubject::query()->create([
+        'curriculum_version_id' => $otherVersion->id,
+        'subject_id' => $subject->id,
+        'semester_no' => 1,
+        'course_year' => 1,
+        'auditorium_hours' => 30,
+        'lecture_hours' => 20,
+        'exercise_hours' => 10,
+        'self_study_hours' => 5,
+        'control_type' => 'ТО',
+    ]);
+
+    expect($firstPlanSubject->hourValues()['auditorium_hours'])->toBe(60)
+        ->and($firstPlanSubject->hourValues()['self_study_hours'])->toBe(10)
+        ->and($secondPlanSubject->hourValues()['auditorium_hours'])->toBe(30)
+        ->and($secondPlanSubject->hourValues()['self_study_hours'])->toBe(5)
+        ->and($subject->fresh()->code)->toBe('ART-101');
+});
+
+it('migrates legacy subject workload into plan rows before removing catalog columns', function () {
+    $version = createStudyImportVersion();
+    $subject = Subject::query()->create([
+        'code' => 'ART-101',
+        'name' => 'Рисуване',
+    ]);
+    $curriculumSubject = CurriculumSubject::query()->create([
+        'curriculum_version_id' => $version->id,
+        'subject_id' => $subject->id,
+        'semester_no' => 1,
+        'course_year' => 1,
+    ]);
+
+    Schema::table('subjects', function (Blueprint $table): void {
+        $table->unsignedSmallInteger('auditorium_hours')->nullable();
+        $table->unsignedSmallInteger('lecture_hours')->nullable();
+        $table->unsignedSmallInteger('exercise_hours')->nullable();
+        $table->unsignedSmallInteger('self_study_hours')->nullable();
+        $table->string('control_type', 30)->nullable();
+    });
+    DB::table('subjects')->where('id', $subject->id)->update([
+        'auditorium_hours' => 60,
+        'lecture_hours' => 30,
+        'exercise_hours' => 30,
+        'self_study_hours' => 20,
+        'control_type' => 'И',
+    ]);
+
+    $migration = require database_path('migrations/2026_11_11_150000_remove_shared_subject_workload_columns.php');
+    $migration->up();
+
+    expect($curriculumSubject->fresh()->hourValues())->toBe([
+        'auditorium_hours' => 60,
+        'lecture_hours' => 30,
+        'exercise_hours' => 30,
+        'self_study_hours' => 20,
+        'control_type' => 'И',
+    ])->and(Schema::hasColumn('subjects', 'auditorium_hours'))->toBeFalse();
 });
 
 it('shows ambiguous subject matches and imports only the explicitly selected record', function () {
@@ -542,6 +636,19 @@ it('previews and imports PlanAZ rows without requiring one curriculum version', 
         'group_name' => '1',
         'student_count' => 24,
     ]);
+    $importedGroup = StudentGroup::query()->firstOrFail();
+    expect($importedGroup->display_name)->toBe('1 курс');
+
+    StudentGroup::query()->create([
+        'specialty_id' => $importedGroup->specialty_id,
+        'curriculum_version_id' => $importedGroup->curriculum_version_id,
+        'course_year' => 1,
+        'group_name' => '2',
+        'student_count' => 20,
+    ]);
+
+    expect($importedGroup->fresh()->display_name)->toBe('1 курс · група 1')
+        ->and(StudentGroup::query()->where('group_name', '2')->firstOrFail()->display_name)->toBe('1 курс · група 2');
 
     $teacher = Teacher::query()->firstOrFail();
     $subject = Subject::query()->firstOrFail();
@@ -624,6 +731,158 @@ it('associates each PlanAZ table with its preceding teacher name and strips work
     ]);
 });
 
+it('assigns imported PlanAZ teachers to the matching group and lesson type', function () {
+    $admin = createStudyImportAdmin();
+    $specialty = Specialty::query()->create(['name' => 'Изобразително изкуство']);
+    $version = CurriculumVersion::query()->create([
+        'specialty_id' => $specialty->id,
+        'name' => 'Учебен план 2026',
+        'version_year' => 2026,
+        'is_active' => true,
+    ]);
+    $subject = Subject::query()->create(['code' => 'ART-101', 'name' => 'Рисуване']);
+    CurriculumSubject::query()->create([
+        'curriculum_version_id' => $version->id,
+        'subject_id' => $subject->id,
+        'semester_no' => 1,
+        'course_year' => 1,
+        'subject_category' => 'mandatory',
+        'is_selected' => true,
+        'auditorium_hours' => 60,
+        'lecture_hours' => 30,
+        'exercise_hours' => 30,
+    ]);
+    $lectureTeacher = Teacher::query()->create([
+        'first_name' => 'Иван',
+        'last_name' => 'Иванов',
+        'title' => 'ас.',
+        'max_daily_hours' => 8,
+        'weekly_workload_hours' => 12,
+        'active' => true,
+    ]);
+    $groupTwoLectureTeacher = Teacher::query()->create([
+        'first_name' => 'Мария',
+        'last_name' => 'Петрова',
+        'title' => 'доц.',
+        'max_daily_hours' => 8,
+        'weekly_workload_hours' => 12,
+        'active' => true,
+    ]);
+    $exerciseTeacher = Teacher::query()->create([
+        'first_name' => 'Елена',
+        'last_name' => 'Георгиева',
+        'title' => 'гл. ас.',
+        'max_daily_hours' => 8,
+        'weekly_workload_hours' => 12,
+        'active' => true,
+    ]);
+    $headers = ['Дисциплина', 'Вид', 'Специалност', 'ФО', 'Курс', 'Сем.', 'Гр.', 'Л/У', 'Пл.ч.', 'Брой студ.'];
+    $table = fn (array $row): string => '<table><tr>'.implode('', array_map(fn (string $header): string => '<th>'.$header.'</th>', $headers))
+        .'</tr><tr>'.implode('', array_map(fn (string $cell): string => '<td>'.$cell.'</td>', $row)).'</tr></table>';
+    $html = '<!doctype html><html lang="bg"><meta charset="utf-8"><body>'
+        .'<p><span class="h3">ас.</span> <span class="h3">Иван</span> <span class="h3">Иванов</span> Възложен и редуциран: 30</p>'
+        .$table(['Рисуване', 'Задължителна', 'Изобразително изкуство - ССО', 'РФ', '1', '1', '1', 'Л', '30', '20'])
+        .'<p><span class="h3">доц.</span> <span class="h3">Мария</span> <span class="h3">Петрова</span> Възложен и редуциран: 30</p>'
+        .$table(['Рисуване', 'Задължителна', 'Изобразително изкуство - ССО', 'РФ', '1', '1', '2', 'Л', '30', '18'])
+        .'<p><span class="h3">гл. ас.</span> <span class="h3">Елена</span> <span class="h3">Георгиева</span> Възложен и редуциран: 30</p>'
+        .$table(['Рисуване', 'Задължителна', 'Изобразително изкуство - ССО', 'РФ', '1', '1', '1', 'У', '30', '20'])
+        .'</body></html>';
+
+    $response = $this->actingAs($admin)
+        ->post(route('imports.preview'), [
+            'kind' => 'teachers',
+            'employment_category' => 'full_time',
+            'academic_year' => '2026/2027',
+            'file' => UploadedFile::fake()->createWithContent('PlanAZ.html', $html),
+        ])
+        ->assertOk()
+        ->assertSee('value="'.$lectureTeacher->id.'" selected', false)
+        ->assertSee('value="'.$groupTwoLectureTeacher->id.'" selected', false)
+        ->assertSee('value="'.$exerciseTeacher->id.'" selected', false);
+    $preview = $response->viewData('preview');
+
+    expect(count($preview['rows']))->toBe(3)
+        ->and($preview['rows'][0]['subject_candidates'][0]['id'])->toBe($subject->id)
+        ->and($preview['rows'][0]['teacher_candidates'][0]['id'])->toBe($lectureTeacher->id)
+        ->and($preview['rows'][1]['teacher_candidates'][0]['id'])->toBe($groupTwoLectureTeacher->id)
+        ->and($preview['rows'][2]['teacher_candidates'][0]['id'])->toBe($exerciseTeacher->id)
+        ->and($preview['rows'][0]['coverage_type'])->toBe('lecture')
+        ->and($preview['rows'][1]['coverage_type'])->toBe('lecture')
+        ->and($preview['rows'][2]['coverage_type'])->toBe('exercise');
+
+    $this->post(route('imports.confirm'), [
+        'token' => $response->viewData('token'),
+        'subjects' => [0 => (string) $subject->id, 1 => (string) $subject->id, 2 => (string) $subject->id],
+        'teachers' => [
+            0 => (string) $lectureTeacher->id,
+            1 => (string) $groupTwoLectureTeacher->id,
+            2 => (string) $exerciseTeacher->id,
+        ],
+    ])->assertRedirect(route('catalog.index'));
+
+    $groupOne = StudentGroup::query()->where('group_name', '1')->firstOrFail();
+    $groupTwo = StudentGroup::query()->where('group_name', '2')->firstOrFail();
+    $this->assertDatabaseCount('student_groups', 2);
+    $scheduleService = app(ScheduleService::class);
+    $scheduleService->generateForGroup($groupOne, '2026/2027', 'winter');
+    $scheduleService->generateForGroup($groupTwo, '2026/2027', 'winter');
+
+    $groupOneLecture = TimetableEntry::query()
+        ->where('group_id', $groupOne->id)
+        ->where('coverage_type', 'lecture')
+        ->firstOrFail();
+    $groupOneExercise = TimetableEntry::query()
+        ->where('group_id', $groupOne->id)
+        ->where('coverage_type', 'exercise')
+        ->firstOrFail();
+    $groupTwoLecture = TimetableEntry::query()
+        ->where('group_id', $groupTwo->id)
+        ->where('coverage_type', 'lecture')
+        ->firstOrFail();
+    expect($groupOneLecture->teacher_id)->toBe($lectureTeacher->id)
+        ->and($groupOneExercise->teacher_id)->toBe($exerciseTeacher->id)
+        ->and($groupTwoLecture->teacher_id)->toBe($groupTwoLectureTeacher->id);
+
+    $manualTeacher = Teacher::query()->create([
+        'first_name' => 'Николай',
+        'last_name' => 'Димитров',
+        'max_daily_hours' => 8,
+        'weekly_workload_hours' => 12,
+        'active' => true,
+    ]);
+    $scheduleService->moveEntry($groupOneLecture, [
+        'cycle_week' => $groupOneLecture->cycle_week,
+        'weekday_no' => $groupOneLecture->weekday_no,
+        'start_time' => $groupOneLecture->start_time,
+        'end_time' => $groupOneLecture->end_time,
+        'duration_hours' => $groupOneLecture->duration_hours,
+        'teacher_id' => $manualTeacher->id,
+        'room_id' => $groupOneLecture->room_id,
+        'locked' => false,
+        'is_in_pool' => true,
+    ]);
+
+    $this->assertDatabaseHas('teacher_assignments', [
+        'teacher_id' => $manualTeacher->id,
+        'student_group_id' => $groupOne->id,
+        'coverage_type' => 'lecture',
+    ]);
+    $this->assertDatabaseHas('teacher_assignments', [
+        'teacher_id' => $groupTwoLectureTeacher->id,
+        'student_group_id' => $groupTwo->id,
+        'coverage_type' => 'lecture',
+    ]);
+    $this->assertDatabaseHas('teacher_assignments', [
+        'teacher_id' => $exerciseTeacher->id,
+        'student_group_id' => $groupOne->id,
+        'coverage_type' => 'exercise',
+    ]);
+    $this->get(route('catalog.curriculum-versions.show', $version))
+        ->assertOk()
+        ->assertSee('Група 1')
+        ->assertSee('Група 2');
+});
+
 it('updates matching PlanAZ assignments on reimport without duplicating them', function () {
     $this->actingAs(createStudyImportAdmin());
     $specialty = Specialty::query()->create(['name' => 'Изобразително изкуство - ССО']);
@@ -668,6 +927,38 @@ it('updates matching PlanAZ assignments on reimport without duplicating them', f
     ]);
     $this->assertDatabaseCount('specialties', 1);
     $this->assertDatabaseCount('student_groups', 1);
+});
+
+it('imports a department for a teacher and does not erase it when the source omits the department', function () {
+    $this->actingAs(createStudyImportAdmin());
+    $teacher = Teacher::query()->create([
+        'first_name' => 'Иван',
+        'last_name' => 'Иванов',
+        'department' => 'Стара катедра',
+        'max_daily_hours' => 8,
+        'weekly_workload_hours' => 0,
+        'active' => true,
+    ]);
+
+    $withDepartment = submitStudyImportPreview(
+        'teachers',
+        null,
+        planAzHtml(departmentName: 'Нова катедра'),
+    )->assertOk()->assertViewHas('preview', fn (array $preview): bool => $preview['rows'][0]['department_name'] === 'Нова катедра');
+    $this->post(route('imports.confirm'), [
+        'token' => $withDepartment->viewData('token'),
+        'subjects' => [0 => 'create'],
+        'teachers' => [0 => (string) $teacher->id],
+    ])->assertRedirect();
+    expect($teacher->fresh()->department)->toBe('Нова катедра');
+
+    $withoutDepartment = submitStudyImportPreview('teachers', null, planAzHtml())->assertOk();
+    $this->post(route('imports.confirm'), [
+        'token' => $withoutDepartment->viewData('token'),
+        'subjects' => [0 => 'create'],
+        'teachers' => [0 => (string) $teacher->id],
+    ])->assertRedirect();
+    expect($teacher->fresh()->department)->toBe('Нова катедра');
 });
 
 it('imports separate staff and honorary files without duplicating a teacher', function () {

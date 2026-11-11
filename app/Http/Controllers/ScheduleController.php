@@ -30,15 +30,19 @@ class ScheduleController extends Controller
             'group_id' => ['nullable', 'integer', 'exists:student_groups,id'],
             'academic_year' => ['nullable', 'string', 'max:20'],
             'semester_type' => ['nullable', 'in:winter,summer'],
+            'current_semester' => ['nullable', 'integer', 'between:1,4'],
             'cycle_week' => ['nullable', 'integer', 'between:1,3'],
         ]);
 
-        $groups = StudentGroup::query()
+        $groupsQuery = StudentGroup::query()
             ->with(['specialty', 'curriculumVersion'])
             ->orderBy('specialty_id')
             ->orderBy('course_year')
-            ->orderBy('group_name')
-            ->get();
+            ->orderBy('group_name');
+        if (isset($filters['current_semester'])) {
+            $groupsQuery->whereHas('curriculumVersion', fn ($query) => $query->where('current_semester', $filters['current_semester']));
+        }
+        $groups = $groupsQuery->get();
 
         $selectedGroup = isset($filters['group_id'])
             ? $groups->firstWhere('id', (int) $filters['group_id'])
@@ -84,6 +88,34 @@ class ScheduleController extends Controller
                 ->orderBy('weekday_no')
                 ->orderBy('start_time')
                 ->get();
+            $poolEntries = $poolEntries
+                ->groupBy(fn (TimetableEntry $entry): string => implode('|', [
+                    $entry->student_flow_id ? 'flow-'.$entry->student_flow_id : 'group-'.$entry->group_id,
+                    $entry->subject_id ? 'subject-'.$entry->subject_id : 'custom-'.mb_strtolower(trim((string) $entry->custom_subject_name)),
+                ]))
+                ->map(function ($entries): object {
+                    $blocks = $entries->sortBy('id')->values();
+
+                    return (object) [
+                        'entry' => $blocks->first(),
+                        'blocks' => $blocks,
+                        'block_count' => $blocks->count(),
+                        'all_standard_blocks' => $blocks->every(fn (TimetableEntry $block): bool => (int) $block->duration_hours === 4),
+                        'remaining_hours' => (int) $blocks->sum('duration_hours') * 5,
+                        'auditorium_hours' => (float) $blocks->sum('auditorium_hours') * 5,
+                        'self_study_hours' => (float) $blocks->sum('self_study_hours') * 5,
+                        'coverage_types' => $blocks->pluck('coverage_type')
+                            ->filter()
+                            ->unique()
+                            ->map(fn (string $coverageType): string => $coverageType === 'lecture' ? 'Лекции' : 'Упражнения')
+                            ->values(),
+                        'teachers' => $blocks->map(fn (TimetableEntry $block): ?string => $block->teacher
+                            ? trim(($block->teacher->title ? $block->teacher->title.' ' : '').$block->teacher->first_name.' '.$block->teacher->last_name)
+                            : null)->filter()->unique()->values(),
+                        'has_manual_blocks' => $blocks->contains(fn (TimetableEntry $block): bool => $block->pool_reason !== 'auto'),
+                    ];
+                })
+                ->values();
         }
 
         return view('schedules.index', [
@@ -91,6 +123,7 @@ class ScheduleController extends Controller
             'selectedGroup' => $selectedGroup,
             'academicYear' => $academicYear,
             'semesterType' => $semesterType,
+            'currentSemester' => isset($filters['current_semester']) ? (int) $filters['current_semester'] : null,
             'cycleWeek' => $cycleWeek,
             'curriculumSubjects' => $curriculumSubjects,
             'note' => $selectedGroup === null ? null : ScheduleNote::query()
@@ -179,7 +212,7 @@ class ScheduleController extends Controller
         $group = StudentGroup::query()->findOrFail($data['group_id']);
         $result = $scheduleService->refreshForGroup($group, $data['academic_year'], $data['semester_type']);
         $message = 'Разписанието е презаредено без преместване на запазените занятия.'
-            .' Добавени в пула: '.$result['added'].'. Преместени в пула: '.$result['pooled'].'.';
+            .' Добавени в пула: '.$result['added'].'. Преместени в пула: '.$result['pooled'].'. Премахнати излишни автоматични блокове: '.$result['removed'].'.';
 
         if ($result['messages'] !== []) {
             $message .= ' '.implode(' ', $result['messages']);
@@ -258,6 +291,7 @@ class ScheduleController extends Controller
         $data = $request->validate([
             'cycle_week' => ['required', 'integer', 'between:1,3'],
             'weekday_no' => ['required', 'integer', 'between:1,7'],
+            'day_part' => ['sometimes', 'in:morning,afternoon,evening'],
             'start_time' => ['required', 'date_format:H:i'],
             'end_time' => ['required', 'date_format:H:i', 'after:start_time'],
             'duration_hours' => ['nullable', 'integer', 'between:1,16'],
@@ -291,10 +325,19 @@ class ScheduleController extends Controller
 
         $data['locked'] = $request->boolean('locked');
 
-        $scheduleService->moveEntry($entry, $data);
+        $entry = $scheduleService->moveEntry($entry, $data);
+        $automaticallyPlaced = (int) $entry->getAttribute('auto_placed_count');
+        $stillInPool = (int) $entry->getAttribute('auto_pending_count');
+        $status = 'Промените са запазени.';
+        if ($automaticallyPlaced > 0) {
+            $status .= ' Автоматично са разпределени още '.$automaticallyPlaced.' блока по следващите свободни дни.';
+        }
+        if ($stillInPool > 0) {
+            $status .= ' '.$stillInPool.' блока останаха в пула заради липса на съвместими свободни места.';
+        }
 
         if ($request->expectsJson()) {
-            return response()->json(['message' => 'Занятието е преместено.']);
+            return response()->json(['message' => $status]);
         }
 
         return redirect()->route('schedules.index', $request->only([
@@ -302,7 +345,7 @@ class ScheduleController extends Controller
             'academic_year',
             'semester_type',
             'cycle_week',
-        ]))->with('status', 'Промените са запазени.');
+        ]))->with('status', $status);
     }
 
     public function park(Request $request, TimetableEntry $entry, ScheduleService $scheduleService): RedirectResponse|JsonResponse
@@ -528,6 +571,7 @@ class ScheduleController extends Controller
             })
             ->where('academic_year', $academicYear)
             ->where('semester_type', $semesterType)
+            ->where('is_in_pool', false)
             ->orderBy('cycle_week')
             ->orderBy('weekday_no')
             ->orderBy('start_time')

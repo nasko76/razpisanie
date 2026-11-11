@@ -13,16 +13,21 @@ use Illuminate\Support\Facades\Route;
 
 Route::get('/', [PublicScheduleController::class, 'index'])->name('home');
 
+Route::middleware(['auth', 'role:admin|department_head'])->group(function () {
+    Route::get('/admin/catalog', [CatalogController::class, 'index'])->name('catalog.index');
+    Route::middleware('role:admin')->get('/admin/catalog/teachers/create', [CatalogDetailsController::class, 'createTeacher'])->name('catalog.teachers.create');
+    Route::get('/admin/catalog/teachers/{teacher}', [CatalogDetailsController::class, 'teacher'])->name('catalog.teachers.show');
+    Route::put('/admin/catalog/teachers/{teacher}/preferred-days', [TeacherDayPreferenceController::class, 'update'])->name('catalog.teachers.preferred-days');
+});
+
 Route::middleware(['auth', 'role:admin'])->group(function () {
     Route::get('/dashboard', [AdminController::class, 'index'])->name('dashboard');
     Route::get('/admin', [AdminController::class, 'index'])->name('admin.dashboard');
 
-    Route::get('/admin/catalog', [CatalogController::class, 'index'])->name('catalog.index');
+    Route::get('/admin/catalog/coverage-report', [CatalogController::class, 'coverageReport'])->name('catalog.coverage-report');
     Route::get('/admin/settings', [SoftwareSettingsController::class, 'index'])->name('settings.index');
     Route::put('/admin/settings', [SoftwareSettingsController::class, 'update'])->name('settings.update');
-    Route::get('/admin/catalog/teachers/create', [CatalogDetailsController::class, 'createTeacher'])->name('catalog.teachers.create');
     Route::get('/admin/catalog/curriculum-versions/{curriculumVersion}', [CatalogDetailsController::class, 'curriculumVersion'])->name('catalog.curriculum-versions.show');
-    Route::get('/admin/catalog/teachers/{teacher}', [CatalogDetailsController::class, 'teacher'])->name('catalog.teachers.show');
     Route::get('/admin/imports', [StudyDataImportController::class, 'index'])->name('imports.index');
     Route::post('/admin/imports/preview', [StudyDataImportController::class, 'preview'])->name('imports.preview');
     Route::post('/admin/imports/confirm', [StudyDataImportController::class, 'confirm'])->name('imports.confirm');
@@ -40,12 +45,14 @@ Route::middleware(['auth', 'role:admin'])->group(function () {
     Route::patch('/admin/catalog/curriculum-subjects/{curriculumSubject}/selection', [CatalogController::class, 'updateCurriculumSubjectSelection'])->name('catalog.curriculum-subjects.selection.update');
     Route::delete('/admin/catalog/curriculum-subjects/{curriculumSubject}', [CatalogController::class, 'destroyCurriculumSubject'])->name('catalog.curriculum-subjects.destroy');
     Route::post('/admin/catalog/groups', [CatalogController::class, 'storeGroup'])->name('catalog.groups.store');
+    Route::delete('/admin/catalog/groups', [CatalogController::class, 'destroyGroups'])->name('catalog.groups.bulk-destroy');
     Route::patch('/admin/catalog/groups/{group}', [CatalogController::class, 'updateGroup'])->name('catalog.groups.update');
     Route::delete('/admin/catalog/groups/{group}', [CatalogController::class, 'destroyGroup'])->name('catalog.groups.destroy');
     Route::post('/admin/catalog/subjects', [CatalogController::class, 'storeSubject'])->name('catalog.subjects.store');
     Route::patch('/admin/catalog/subjects/{subject}', [CatalogController::class, 'updateSubject'])->name('catalog.subjects.update');
     Route::delete('/admin/catalog/subjects/{subject}', [CatalogController::class, 'destroySubject'])->name('catalog.subjects.destroy');
     Route::post('/admin/catalog/teachers', [CatalogController::class, 'storeTeacher'])->name('catalog.teachers.store');
+    Route::patch('/admin/catalog/department-head', [CatalogController::class, 'updateDepartmentHead'])->name('catalog.department-head.update');
     Route::patch('/admin/catalog/teachers/{teacher}', [CatalogController::class, 'updateTeacher'])->name('catalog.teachers.update');
     Route::delete('/admin/catalog/teachers/{teacher}', [CatalogController::class, 'destroyTeacher'])->name('catalog.teachers.destroy');
     Route::post('/admin/catalog/teacher-assignments', [CatalogController::class, 'storeTeacherAssignment'])->name('catalog.teacher-assignments.store');
@@ -53,11 +60,11 @@ Route::middleware(['auth', 'role:admin'])->group(function () {
     Route::post('/admin/catalog/student-flows', [CatalogController::class, 'storeStudentFlow'])->name('catalog.student-flows.store');
     Route::patch('/admin/catalog/student-flows/{studentFlow}', [CatalogController::class, 'updateStudentFlow'])->name('catalog.student-flows.update');
     Route::delete('/admin/catalog/student-flows/{studentFlow}', [CatalogDetailsController::class, 'destroyStudentFlow'])->name('catalog.student-flows.destroy');
-    Route::put('/admin/catalog/teachers/{teacher}/preferred-days', [TeacherDayPreferenceController::class, 'update'])->name('catalog.teachers.preferred-days');
     Route::post('/admin/catalog/teachers/{teacher}/absences', [CatalogController::class, 'storeTeacherAbsence'])->name('catalog.teachers.absences.store');
     Route::delete('/admin/catalog/teachers/{teacher}/absences/{absence}', [CatalogController::class, 'destroyTeacherAbsence'])->name('catalog.teachers.absences.destroy');
     Route::post('/admin/catalog/rooms', [CatalogController::class, 'storeRoom'])->name('catalog.rooms.store');
     Route::patch('/admin/catalog/rooms/{room}', [CatalogController::class, 'updateRoom'])->name('catalog.rooms.update');
+    Route::delete('/admin/catalog/rooms/{room}', [CatalogController::class, 'destroyRoom'])->name('catalog.rooms.destroy');
 
     Route::get('/schedules', [ScheduleController::class, 'index'])->name('schedules.index');
     Route::post('/schedules/generate', [ScheduleController::class, 'generate'])->name('schedules.generate');

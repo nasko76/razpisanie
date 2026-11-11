@@ -1,5 +1,6 @@
 <?php
 
+use App\Models\ScheduleNote;
 use App\Models\Specialty;
 use App\Models\StudentGroup;
 use App\Models\Subject;
@@ -43,6 +44,28 @@ it('shows the latest available term for the selected specialty and course', func
         'duration_hours' => 2,
         'custom_subject_name' => 'Гост-лектор',
     ]);
+    TimetableEntry::query()->create([
+        'group_id' => $group->id,
+        'subject_id' => null,
+        'teacher_id' => null,
+        'room_id' => null,
+        'academic_year' => '2026/2027',
+        'semester_type' => 'winter',
+        'cycle_week' => 1,
+        'weekday_no' => 7,
+        'start_time' => '09:00:00',
+        'end_time' => '10:30:00',
+        'duration_hours' => 2,
+        'custom_subject_name' => 'Пул-блок, който не е за публикуване',
+        'is_in_pool' => true,
+        'pool_reason' => 'auto',
+    ]);
+    ScheduleNote::query()->create([
+        'group_id' => $group->id,
+        'academic_year' => '2026/2027',
+        'semester_type' => 'winter',
+        'note' => 'Корекция за гост-лектора',
+    ]);
 
     $this->get(route('home', [
         'specialty_id' => $specialty->id,
@@ -53,6 +76,8 @@ it('shows the latest available term for the selected specialty and course', func
         ->assertSee('Зимен семестър')
         ->assertSee('Седмица 1')
         ->assertSee('Гост-лектор')
+        ->assertSee('Корекция за гост-лектора')
+        ->assertDontSee('Пул-блок, който не е за публикуване')
         ->assertSee('Група А')
         ->assertSee('Сутрин')
         ->assertSee('Следобед')
@@ -75,9 +100,6 @@ it('shows both distinct teachers for a subject in the public schedule', function
     $subject = Subject::query()->create([
         'code' => 'RIS-101',
         'name' => 'Рисуване',
-        'auditorium_hours' => 60,
-        'lecture_hours' => 30,
-        'exercise_hours' => 30,
     ]);
     $teachers = collect([
         ['first_name' => 'Иван', 'last_name' => 'Иванов'],
@@ -113,4 +135,41 @@ it('shows both distinct teachers for a subject in the public schedule', function
         ->assertOk()
         ->assertSee('Лекции: Иван Иванов, Упражнения: Мария Петрова')
         ->assertDontSee('Лекции: Иван Иванов, Упражнения: Иван Иванов');
+});
+
+it('uses the saved part of day for public schedule placement after a time edit', function () {
+    $specialty = Specialty::query()->create([
+        'name' => 'Изобразително изкуство',
+        'code' => 'ИИ',
+        'degree' => 'Бакалавър',
+    ]);
+    $group = StudentGroup::query()->create([
+        'specialty_id' => $specialty->id,
+        'curriculum_version_id' => null,
+        'course_year' => 2,
+        'group_name' => 'Група А',
+        'student_count' => 20,
+    ]);
+    TimetableEntry::query()->create([
+        'group_id' => $group->id,
+        'subject_id' => null,
+        'custom_subject_name' => 'Редактирано занятие',
+        'academic_year' => '2026/2027',
+        'semester_type' => 'winter',
+        'cycle_week' => 1,
+        'weekday_no' => 6,
+        'day_part' => 'afternoon',
+        'start_time' => '11:00:00',
+        'end_time' => '16:45:00',
+        'duration_hours' => 6,
+    ]);
+
+    $response = $this->get(route('home', [
+        'specialty_id' => $specialty->id,
+        'course_year' => 2,
+        'cycle_week' => 1,
+    ]))->assertOk();
+
+    expect($response->viewData('schedule')[6]['morning'] ?? [])->toBeEmpty()
+        ->and($response->viewData('schedule')[6]['afternoon'])->toHaveCount(1);
 });

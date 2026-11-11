@@ -104,14 +104,6 @@ class StudyDataImportService
                         ->where('course_year', $row['course_year'])
                         ->exists();
 
-                    $subject->update([
-                        'auditorium_hours' => $row['auditorium_hours'] ?? $row['contact_hours'] ?? 0,
-                        'lecture_hours' => $row['lecture_hours'] ?? 0,
-                        'exercise_hours' => $row['exercise_hours'] ?? 0,
-                        'self_study_hours' => $row['self_study_hours'] ?? 0,
-                        'control_type' => $row['normalized_control_type'],
-                    ]);
-
                     $curriculumSubject = CurriculumSubject::query()->firstOrNew([
                         'curriculum_version_id' => $version->id,
                         'subject_id' => $subject->id,
@@ -121,6 +113,11 @@ class StudyDataImportService
                     $wasExisting = $curriculumSubject->exists;
                     $curriculumSubject->fill([
                         'subject_category' => $row['subject_category'],
+                        'auditorium_hours' => $row['auditorium_hours'] ?? $row['contact_hours'] ?? 0,
+                        'lecture_hours' => $row['lecture_hours'] ?? 0,
+                        'exercise_hours' => $row['exercise_hours'] ?? 0,
+                        'self_study_hours' => $row['self_study_hours'] ?? 0,
+                        'control_type' => $row['normalized_control_type'],
                         'source_data' => [
                             'columns' => $row['source'],
                             'warnings' => $row['warnings'],
@@ -157,10 +154,16 @@ class StudyDataImportService
 
                 $subject = $this->resolveSubject($subjectChoice, $row['subject_candidates'], $row, $createdSubjects);
                 $teacher = $this->resolveTeacher($teacherChoice, $row['teacher_candidates'], $row, $createdTeachers);
+                $teacherUpdates = [];
+                $departmentName = trim((string) ($row['department_name'] ?? ''));
+                if ($departmentName !== '' && $teacher->department !== $departmentName) {
+                    $teacherUpdates['department'] = $departmentName;
+                }
                 if ($preview['employment_category'] === 'honorary') {
-                    $teacher->forceFill([
-                        'title' => $this->honoraryTeacherTitle($teacher->title),
-                    ])->save();
+                    $teacherUpdates['title'] = $this->honoraryTeacherTitle($teacher->title);
+                }
+                if ($teacherUpdates !== []) {
+                    $teacher->forceFill($teacherUpdates)->save();
                 }
                 $specialty = $this->resolveSpecialty($row['specialty_name']);
                 $group = $this->resolveStudentGroup($specialty, $row);
@@ -391,7 +394,7 @@ class StudyDataImportService
             }
 
             $foundPlanAzTable = true;
-            $context = $contexts[$tableIndex] ?? ['teacher_name' => '', 'total_assigned_hours' => null, 'header_text' => ''];
+            $context = $contexts[$tableIndex] ?? ['teacher_name' => '', 'total_assigned_hours' => null, 'header_text' => '', 'department_name' => null];
             $teacherName = $context['teacher_name'];
             $teacher = $this->splitTeacherName($teacherName);
             if ($teacher !== null && $employmentCategory === 'honorary') {
@@ -441,6 +444,9 @@ class StudyDataImportService
                 if ($studentCount === null && $indexes['student_count'] !== null) {
                     $warnings[] = 'Броят на студентите не е разпознат; при създаване на групата ще бъде 0.';
                 }
+                if ($context['department_name'] !== null && mb_strlen($context['department_name']) > 255) {
+                    $warnings[] = 'Името на катедрата надвишава допустимата дължина.';
+                }
                 if ($candidateTeachers === []) {
                     $warnings[] = 'Преподавателят не е намерен и ще бъде създаден след потвърждение.';
                 }
@@ -460,6 +466,7 @@ class StudyDataImportService
                     'teacher_name' => $teacherName,
                     'teacher_parts' => $teacher,
                     'teacher_candidates' => $candidateTeachers,
+                    'department_name' => $context['department_name'],
                     'specialty_name' => $specialtyName,
                     'course_year' => $courseYear !== null && $courseYear >= 1 && $courseYear <= 6 ? $courseYear : null,
                     'semester_no' => $semesterNo !== null && $semesterNo >= 1 && $semesterNo <= 12 ? $semesterNo : null,
@@ -486,6 +493,7 @@ class StudyDataImportService
                         && $plannedHours !== null
                         && mb_strlen($subjectName) <= 255
                         && mb_strlen($specialtyName) <= 255
+                        && ($context['department_name'] === null || mb_strlen($context['department_name']) <= 255)
                         && mb_strlen($teacherName) <= 255
                         && mb_strlen($groupName ?? '') <= 255,
                     'warnings' => $warnings,
@@ -582,7 +590,7 @@ class StudyDataImportService
     }
 
     /**
-     * @return array<int, array{teacher_name: string, total_assigned_hours: int|null, header_text: string}>
+     * @return array<int, array{teacher_name: string, total_assigned_hours: int|null, header_text: string, department_name: string|null}>
      */
     private function planAzTableContexts(string $html): array
     {
@@ -686,14 +694,19 @@ class StudyDataImportService
             if (preg_match('/възложен(?:и)?(?:\s+и\s+редуциран\w*)?[^0-9]{0,40}([0-9]{1,4})/iu', $headerText, $matches) === 1) {
                 $totalAssignedHours = (int) $matches[1];
             }
+            $departmentName = null;
+            if (preg_match('/Катедра\s*[:\-]?\s*["«„]([^"»”„“]+)["»”"]?/iu', $headerText, $matches) === 1) {
+                $departmentName = trim($matches[1]);
+            }
 
-            $contexts[] = compact('teacherName', 'totalAssignedHours', 'headerText');
+            $contexts[] = compact('teacherName', 'totalAssignedHours', 'headerText', 'departmentName');
         }
 
         return array_map(fn (array $context): array => [
             'teacher_name' => $context['teacherName'],
             'total_assigned_hours' => $context['totalAssignedHours'],
             'header_text' => $context['headerText'],
+            'department_name' => $context['departmentName'],
         ], $contexts);
     }
 
@@ -1098,11 +1111,14 @@ class StudyDataImportService
      */
     private function resolveStudentGroup(Specialty $specialty, array $row): StudentGroup
     {
+        Specialty::query()->whereKey($specialty->id)->lockForUpdate()->firstOrFail();
+
         $curriculumVersion = $specialty->curriculumVersions()
             ->where('is_active', true)
             ->orderByDesc('version_year')
             ->orderByDesc('id')
             ->first();
+        $groupName = filled($row['group_name'] ?? null) ? trim((string) $row['group_name']) : null;
 
         $groupQuery = StudentGroup::query()
             ->where('specialty_id', $specialty->id)
@@ -1112,10 +1128,10 @@ class StudyDataImportService
         } else {
             $groupQuery->where('curriculum_version_id', $curriculumVersion->id);
         }
-        if ($row['group_name'] === null) {
+        if ($groupName === null) {
             $groupQuery->whereNull('group_name');
         } else {
-            $groupQuery->where('group_name', $row['group_name']);
+            $groupQuery->where('group_name', $groupName);
         }
 
         $group = $groupQuery->orderBy('id')->first();
@@ -1125,7 +1141,7 @@ class StudyDataImportService
                 'specialty_id' => $specialty->id,
                 'curriculum_version_id' => $curriculumVersion?->id,
                 'course_year' => $row['course_year'],
-                'group_name' => $row['group_name'],
+                'group_name' => $groupName,
                 'student_count' => $row['student_count'],
             ]);
         }

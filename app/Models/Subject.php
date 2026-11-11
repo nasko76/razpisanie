@@ -10,11 +10,6 @@ class Subject extends Model
     protected $fillable = [
         'code',
         'name',
-        'auditorium_hours',
-        'lecture_hours',
-        'exercise_hours',
-        'self_study_hours',
-        'control_type',
     ];
 
     public function curriculumSubjects(): HasMany

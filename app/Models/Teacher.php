@@ -30,6 +30,7 @@ class Teacher extends Model
         'first_name',
         'last_name',
         'title',
+        'department',
         'max_daily_hours',
         'weekly_workload_hours',
         'active',

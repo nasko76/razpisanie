@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\ScheduleNote;
 use App\Models\SoftwareSetting;
 use App\Models\Specialty;
 use App\Models\StudentGroup;
@@ -24,9 +25,9 @@ class PublicScheduleController extends Controller
     ];
 
     private const DAY_PARTS = [
-        'morning' => ['label' => 'Сутрин', 'before' => '12:00'],
-        'afternoon' => ['label' => 'Следобед', 'before' => '16:00'],
-        'evening' => ['label' => 'Вечер', 'before' => null],
+        'morning' => ['label' => 'Сутрин'],
+        'afternoon' => ['label' => 'Следобед'],
+        'evening' => ['label' => 'Вечер'],
     ];
 
     public function index(Request $request): View
@@ -68,8 +69,11 @@ class PublicScheduleController extends Controller
 
         $activeEntry = $hasSelection && $scheduleGroupIds->isNotEmpty()
             ? TimetableEntry::query()
-                ->whereIn('group_id', $scheduleGroupIds)
-                ->orWhereHas('studentFlow.groups', fn ($query) => $query->whereIn('student_groups.id', $scheduleGroupIds))
+                ->where(function ($query) use ($scheduleGroupIds): void {
+                    $query->whereIn('group_id', $scheduleGroupIds)
+                        ->orWhereHas('studentFlow.groups', fn ($groupsQuery) => $groupsQuery->whereIn('student_groups.id', $scheduleGroupIds));
+                })
+                ->where('is_in_pool', false)
                 ->orderByDesc('academic_year')
                 ->orderByDesc('updated_at')
                 ->first(['academic_year', 'semester_type'])
@@ -87,6 +91,7 @@ class PublicScheduleController extends Controller
                 })
                 ->where('academic_year', $academicYear)
                 ->where('semester_type', $semesterType)
+                ->where('is_in_pool', false)
                 ->where('cycle_week', $cycleWeek)
                 ->orderBy('weekday_no')
                 ->orderBy('start_time')
@@ -96,7 +101,7 @@ class PublicScheduleController extends Controller
         $schedule = [];
 
         foreach ($entries as $entry) {
-            $part = $this->dayPart($entry->start_time);
+            $part = $entry->displayDayPart();
             $schedule[$entry->weekday_no][$part][] = $entry;
         }
         $teacherNamesBySubject = $entries->whereNotNull('subject_id')
@@ -134,6 +139,16 @@ class PublicScheduleController extends Controller
             'semesterLabel' => $semesterType === 'summer' ? 'Летен семестър' : 'Зимен семестър',
             'cycleWeek' => $cycleWeek,
             'schedule' => $schedule,
+            'scheduleNotes' => $hasSelection && $scheduleGroupIds->isNotEmpty()
+                ? ScheduleNote::query()
+                    ->with('group')
+                    ->whereIn('group_id', $scheduleGroupIds)
+                    ->where('academic_year', $academicYear)
+                    ->where('semester_type', $semesterType)
+                    ->whereNotNull('note')
+                    ->where('note', '!=', '')
+                    ->get()
+                : collect(),
             'teacherNamesBySubject' => $teacherNamesBySubject,
             'days' => self::DAYS,
             'dayParts' => self::DAY_PARTS,
@@ -153,18 +168,5 @@ class PublicScheduleController extends Controller
         $semesterType = now()->month >= 2 && now()->month < 9 ? 'summer' : 'winter';
 
         return [$academicYear, $semesterType];
-    }
-
-    private function dayPart(string $startTime): string
-    {
-        $time = substr($startTime, 0, 5);
-
-        foreach (self::DAY_PARTS as $part => $definition) {
-            if ($definition['before'] === null || $time < $definition['before']) {
-                return $part;
-            }
-        }
-
-        return 'evening';
     }
 }

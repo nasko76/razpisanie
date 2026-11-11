@@ -93,13 +93,14 @@ it('warns when a preference change affects scheduled classes and shows teacher s
     ]);
     $subject = Subject::query()->create([
         'name' => 'Рисуване',
-        'auditorium_hours' => 20,
     ]);
     CurriculumSubject::query()->create([
         'curriculum_version_id' => $curriculumVersion->id,
         'subject_id' => $subject->id,
         'semester_no' => 1,
         'course_year' => 1,
+        'auditorium_hours' => 20,
+        'lecture_hours' => 20,
     ]);
     $group = StudentGroup::query()->create([
         'specialty_id' => $specialty->id,
@@ -160,6 +161,53 @@ it('warns when a preference change affects scheduled classes and shows teacher s
         ->assertSee('АЗ 3 ч. · Самоподготовка 1 ч.');
 });
 
+it('does not warn about pool blocks when teacher preferences change', function () {
+    $user = User::factory()->create();
+    $user->assignRole(Role::findOrCreate('admin'));
+    $teacher = Teacher::query()->create([
+        'first_name' => 'Иван',
+        'last_name' => 'Иванов',
+        'max_daily_hours' => 8,
+        'weekly_workload_hours' => 20,
+        'active' => true,
+    ]);
+    $specialty = Specialty::query()->create(['name' => 'Дизайн']);
+    $group = StudentGroup::query()->create([
+        'specialty_id' => $specialty->id,
+        'course_year' => 1,
+        'group_name' => 'А',
+        'student_count' => 20,
+    ]);
+    $subject = Subject::query()->create(['name' => 'Композиция']);
+    TimetableEntry::query()->create([
+        'group_id' => $group->id,
+        'subject_id' => $subject->id,
+        'teacher_id' => $teacher->id,
+        'academic_year' => '2026/2027',
+        'semester_type' => 'winter',
+        'cycle_week' => 1,
+        'weekday_no' => 7,
+        'start_time' => '08:00:00',
+        'end_time' => '11:45:00',
+        'duration_hours' => 4,
+        'is_in_pool' => true,
+        'pool_reason' => 'auto',
+    ]);
+
+    $preferences = [];
+    foreach ([1, 2, 3] as $cycleWeek) {
+        foreach (range(1, 7) as $weekday) {
+            $preferences[$cycleWeek][$weekday] = 'neutral';
+        }
+    }
+    $preferences[1][7] = 'unavailable';
+
+    $this->actingAs($user)
+        ->put(route('catalog.teachers.preferred-days', $teacher), ['preferences' => $preferences])
+        ->assertRedirect(route('catalog.teachers.show', $teacher))
+        ->assertSessionMissing('warning');
+});
+
 it('shows curriculum coverage in both the plan overview and teacher dossier', function () {
     $specialty = Specialty::query()->create([
         'name' => 'Изобразително изкуство',
@@ -175,17 +223,17 @@ it('shows curriculum coverage in both the plan overview and teacher dossier', fu
     $subject = Subject::query()->create([
         'code' => 'RIS-101',
         'name' => 'Рисуване',
-        'auditorium_hours' => 60,
-        'lecture_hours' => 30,
-        'exercise_hours' => 30,
-        'self_study_hours' => 20,
-        'control_type' => 'И',
     ]);
     CurriculumSubject::query()->create([
         'curriculum_version_id' => $curriculumVersion->id,
         'subject_id' => $subject->id,
         'semester_no' => 1,
         'course_year' => 1,
+        'auditorium_hours' => 60,
+        'lecture_hours' => 30,
+        'exercise_hours' => 30,
+        'self_study_hours' => 20,
+        'control_type' => 'И',
     ]);
     $teacher = Teacher::query()->create([
         'first_name' => 'Иван',

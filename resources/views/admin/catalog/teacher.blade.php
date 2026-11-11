@@ -65,7 +65,7 @@
 <main class="shell">
     <header class="topbar">
         <a class="brand" href="{{ route('catalog.index') }}"><span class="mark">Ф</span><span>ФИИ · Учебен каталог</span></a>
-        <a href="{{ route('home') }}">Публично разписание</a>
+        @unless($isDepartmentHead)<a href="{{ route('home') }}">Публично разписание</a>@endunless
     </header>
 
     @if(session('status'))<div class="notice">{{ session('status') }}</div>@endif
@@ -80,25 +80,30 @@
             <h1>{{ $teacher->title }} {{ $teacher->first_name }} {{ $teacher->last_name }}</h1>
             <p class="muted">{{ $teacher->active ? 'Активен преподавател' : 'Неактивен преподавател' }} · {{ $assignments->count() }} дисциплини в обезпечеността</p>
         </div>
-        <a class="button" href="{{ route('catalog.index') }}">Назад към каталога</a>
+        <a class="button" href="{{ route('catalog.index', ['tab' => 'teachers']) }}">Назад към каталога</a>
     </section>
 
     <section class="card">
-        <header class="card-head"><h2>Основни данни</h2><p class="muted">Редактирайте натоварването и активността на преподавателя.</p></header>
-        <form class="card-body edit-form" method="POST" action="{{ route('catalog.teachers.update', $teacher) }}">
-            @csrf @method('PATCH')
-            <label>Име<input name="first_name" value="{{ $teacher->first_name }}" required maxlength="100"></label>
-            <label>Фамилия<input name="last_name" value="{{ $teacher->last_name }}" required maxlength="100"></label>
-            <label class="span">Академична длъжност<input name="title" value="{{ $teacher->title }}" maxlength="100"></label>
-            <label>Максимум часове на ден<input name="max_daily_hours" type="number" min="1" max="10" value="{{ min(10, $teacher->max_daily_hours) }}" required></label>
-            <label>Натовареност на седмица<input name="weekly_workload_hours" type="number" min="0" max="80" value="{{ $teacher->weekly_workload_hours }}" required></label>
-            <label>Статус<select name="active"><option value="1" @selected($teacher->active)>Активен</option><option value="0" @selected(!$teacher->active)>Неактивен</option></select></label>
-            <button class="button primary" type="submit">Запази данните</button>
-        </form>
-        <form class="card-body" method="POST" action="{{ route('catalog.teachers.destroy', $teacher) }}" onsubmit="return confirm('Преподавателят ще бъде премахнат от обезпечеността; часовете в разписанията ще останат без преподавател. Продължаване?')">
-            @csrf @method('DELETE')
-            <button class="button danger" type="submit">Изтрий преподавателя</button>
-        </form>
+        <header class="card-head"><h2>Основни данни</h2><p class="muted">{{ $isDepartmentHead ? 'Катедра: '.$teacher->department : 'Редактирайте натоварването и активността на преподавателя.' }}</p></header>
+        @if($isDepartmentHead)
+            <div class="card-body">{{ $teacher->title }} {{ $teacher->first_name }} {{ $teacher->last_name }} · {{ $teacher->department }}</div>
+        @else
+            <form class="card-body edit-form" method="POST" action="{{ route('catalog.teachers.update', $teacher) }}">
+                @csrf @method('PATCH')
+                <label>Име<input name="first_name" value="{{ $teacher->first_name }}" required maxlength="100"></label>
+                <label>Фамилия<input name="last_name" value="{{ $teacher->last_name }}" required maxlength="100"></label>
+                <label class="span">Академична длъжност<input name="title" value="{{ $teacher->title }}" maxlength="100"></label>
+                <label class="span">Катедра<input name="department" value="{{ $teacher->department }}" maxlength="255"></label>
+                <label>Максимум часове на ден<input name="max_daily_hours" type="number" min="1" max="10" value="{{ min(10, $teacher->max_daily_hours) }}" required></label>
+                <label>Натовареност на седмица<input name="weekly_workload_hours" type="number" min="0" max="80" value="{{ $teacher->weekly_workload_hours }}" required></label>
+                <label>Статус<select name="active"><option value="1" @selected($teacher->active)>Активен</option><option value="0" @selected(!$teacher->active)>Неактивен</option></select></label>
+                <button class="button primary" type="submit">Запази данните</button>
+            </form>
+            <form class="card-body" method="POST" action="{{ route('catalog.teachers.destroy', $teacher) }}" onsubmit="return confirm('Преподавателят ще бъде премахнат от обезпечеността; часовете в разписанията ще останат без преподавател. Продължаване?')">
+                @csrf @method('DELETE')
+                <button class="button danger" type="submit">Изтрий преподавателя</button>
+            </form>
+        @endif
     </section>
 
     <section class="card">
@@ -247,21 +252,27 @@
                 <p class="muted">Посочете диапазон за събития, пътувания или други периоди на недостъпност.</p>
             </header>
             <div class="card-body">
-                <form class="edit-form" method="POST" action="{{ route('catalog.teachers.absences.store', $teacher) }}">
-                    @csrf
-                    <label>От дата<input type="date" name="starts_on" required></label>
-                    <label>От час<input type="time" name="starts_time" required></label>
-                    <label>До дата<input type="date" name="ends_on" required></label>
-                    <label>До час<input type="time" name="ends_time" required></label>
-                    <label class="span">Причина<input name="reason" maxlength="255" placeholder="Еразъм, пътуване"></label>
-                    <button class="button primary" type="submit">Добави отсъствие</button>
-                </form>
-                @forelse($teacher->absences as $absence)
-                    <form method="POST" action="{{ route('catalog.teachers.absences.destroy', [$teacher, $absence]) }}" style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:12px">
-                        @csrf @method('DELETE')
-                        <span class="muted">{{ $absence->starts_at->format('d.m.Y H:i') }}–{{ $absence->ends_at->format('d.m.Y H:i') }} · {{ $absence->reason }}</span>
-                        <button class="button danger" type="submit">Премахни</button>
+                @unless($isDepartmentHead)
+                    <form class="edit-form" method="POST" action="{{ route('catalog.teachers.absences.store', $teacher) }}">
+                        @csrf
+                        <label>От дата<input type="date" name="starts_on" required></label>
+                        <label>От час<input type="time" name="starts_time" required></label>
+                        <label>До дата<input type="date" name="ends_on" required></label>
+                        <label>До час<input type="time" name="ends_time" required></label>
+                        <label class="span">Причина<input name="reason" maxlength="255" placeholder="Еразъм, пътуване"></label>
+                        <button class="button primary" type="submit">Добави отсъствие</button>
                     </form>
+                @endunless
+                @forelse($teacher->absences as $absence)
+                    @if($isDepartmentHead)
+                        <p class="muted">{{ $absence->starts_at->format('d.m.Y H:i') }}–{{ $absence->ends_at->format('d.m.Y H:i') }} · {{ $absence->reason }}</p>
+                    @else
+                        <form method="POST" action="{{ route('catalog.teachers.absences.destroy', [$teacher, $absence]) }}" style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:12px">
+                            @csrf @method('DELETE')
+                            <span class="muted">{{ $absence->starts_at->format('d.m.Y H:i') }}–{{ $absence->ends_at->format('d.m.Y H:i') }} · {{ $absence->reason }}</span>
+                            <button class="button danger" type="submit">Премахни</button>
+                        </form>
+                    @endif
                 @empty
                     <p class="empty">Няма добавени отсъствия.</p>
                 @endforelse
@@ -275,6 +286,7 @@
             <p class="muted">Дисциплини от всички специалности, курсове и версии на планове.</p>
         </header>
         <div class="card-body">
+            @unless($isDepartmentHead)
             <form class="assign-form" method="POST" action="{{ route('catalog.teacher-assignments.store') }}" id="teacher-assignment-form">
                 @csrf
                 <input type="hidden" name="teacher_id" value="{{ $teacher->id }}">
@@ -309,6 +321,9 @@
                 </label>
                 <button class="button primary" type="submit">Добави дисциплина</button>
             </form>
+            @else
+                <p class="muted">Обезпечеността се редактира от администратора.</p>
+            @endunless
         </div>
         <div class="table-wrap">
             <table>
@@ -321,10 +336,12 @@
                             <td>{{ $assignment->course_year }} курс · {{ $assignment->semester === 'summer' ? 'летен' : 'зимен' }}@if($assignment->studentGroup)<br><span class="muted">Група {{ $assignment->studentGroup->group_name ?: 'обща' }}</span>@endif</td>
                             <td>{{ $assignment->coverage_type === 'lecture' ? 'Лекции' : 'Упражнения' }}@if($assignment->studentFlow)<br><span class="muted">Общ поток: {{ $assignment->studentFlow->name }}</span>@endif @if($assignment->planned_hours !== null || $assignment->academic_year)<br><span class="muted">{{ $assignment->planned_hours ?? '—' }} ч. · {{ $assignment->academic_year }} · {{ $assignment->employment_category === 'honorary' ? 'хоноруван' : ($assignment->employment_category === 'full_time' ? 'щатен' : 'ръчен запис') }}</span>@endif</td>
                             <td>
+                                @unless($isDepartmentHead)
                                 <form method="POST" action="{{ route('catalog.teacher-assignments.destroy', $assignment) }}" onsubmit="return confirm('Премахване на назначението?')">
                                     @csrf @method('DELETE')
                                     <button class="button danger" type="submit">Премахни</button>
                                 </form>
+                                @endunless
                             </td>
                         </tr>
                     @empty

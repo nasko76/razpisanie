@@ -47,6 +47,19 @@ class StudentGroup extends Model
 
     public function getDisplayNameAttribute(): string
     {
-        return $this->course_year.' курс'.($this->group_name ? ' · група '.$this->group_name : '');
+        $groupName = $this->group_name;
+        if ($groupName === '1') {
+            $groupCount = static::query()
+                ->where('specialty_id', $this->specialty_id)
+                ->where('curriculum_version_id', $this->curriculum_version_id)
+                ->where('course_year', $this->course_year)
+                ->count();
+
+            if ($groupCount === 1) {
+                $groupName = null;
+            }
+        }
+
+        return $this->course_year.' курс'.($groupName ? ' · група '.$groupName : '');
     }
 }

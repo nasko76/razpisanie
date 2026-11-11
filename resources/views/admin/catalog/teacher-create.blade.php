@@ -49,6 +49,7 @@
             <label>Име<input name="first_name" value="{{ old('first_name') }}" required maxlength="100"></label>
             <label>Фамилия<input name="last_name" value="{{ old('last_name') }}" required maxlength="100"></label>
             <label class="span">Академична длъжност<input name="title" value="{{ old('title') }}" maxlength="100" placeholder="доц. д-р"></label>
+            <label class="span">Катедра<input name="department" value="{{ old('department') }}" maxlength="255"></label>
             <label>Максимум часове на ден<input name="max_daily_hours" type="number" min="1" max="10" value="{{ old('max_daily_hours', 8) }}" required></label>
             <label>Натовареност на седмица<input name="weekly_workload_hours" type="number" min="0" max="80" value="{{ old('weekly_workload_hours', 0) }}" required></label>
             <button class="button primary span" type="submit">Създай досие</button>

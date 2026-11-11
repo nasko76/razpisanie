@@ -20,6 +20,7 @@ class TimetableEntry extends Model
         'semester_type',
         'cycle_week',
         'weekday_no',
+        'day_part',
         'start_time',
         'end_time',
         'duration_hours',
@@ -38,6 +39,21 @@ class TimetableEntry extends Model
             'auditorium_hours' => 'decimal:2',
             'self_study_hours' => 'decimal:2',
         ];
+    }
+
+    public function displayDayPart(): string
+    {
+        if ($this->day_part !== null) {
+            return $this->day_part;
+        }
+
+        $startTime = substr($this->start_time, 0, 5);
+
+        return match (true) {
+            $startTime < '12:00' => 'morning',
+            $startTime < '16:00' => 'afternoon',
+            default => 'evening',
+        };
     }
 
     public function group(): BelongsTo

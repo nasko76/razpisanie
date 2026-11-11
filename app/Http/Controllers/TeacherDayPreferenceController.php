@@ -14,6 +14,12 @@ class TeacherDayPreferenceController extends Controller
 {
     public function update(Request $request, Teacher $teacher): RedirectResponse
     {
+        $user = $request->user();
+        $isDepartmentHead = $user?->hasRole('department_head') && ! $user->hasRole('admin');
+        if ($isDepartmentHead) {
+            abort_unless(filled($user->department) && $teacher->department === $user->department, 403);
+        }
+
         $data = $request->validate([
             'preferences' => ['required', 'array', 'size:3'],
             'preferences.*' => ['required', 'array', 'size:7'],
@@ -40,6 +46,7 @@ class TeacherDayPreferenceController extends Controller
                     TimetableEntry::query()
                         ->with('subject')
                         ->where('teacher_id', $teacher->id)
+                        ->where('is_in_pool', false)
                         ->where('cycle_week', (int) $cycleWeek)
                         ->where('weekday_no', (int) $weekday)
                         ->get(),

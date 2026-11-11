@@ -72,10 +72,12 @@
         .schedule-pool { position:fixed; z-index:20; top:82px; right:14px; display:flex; width:min(340px,30vw); max-height:calc(100vh - 100px); flex-direction:column; border:1px solid #d5e3d9; border-radius:14px; background:#fff; box-shadow:0 12px 38px rgba(20,40,28,.2); }
         .schedule-pool-head { padding:13px 15px; border-bottom:1px solid var(--line); background:#f6faf7; border-radius:14px 14px 0 0; }
         .schedule-pool-head strong { display:block; font-size:13px; }
+        .schedule-pool-head input { min-height:34px; margin:9px 0 0; font-size:11px; }
         .schedule-pool-list { min-height:82px; overflow:auto; padding:10px; }
         .schedule-pool-list.over { background:var(--green-soft); }
         .pool-entry { cursor:grab; }
         .pool-entry .edit-form { display:none; }
+        .pool-entry .remaining-hours { color:var(--green); font-weight:750; }
         .pool-count { display:inline-grid; min-width:22px; height:22px; place-items:center; margin-left:5px; border-radius:20px; background:#fce7d7; color:#8d401c; font-size:11px; }
         .notice { margin: 0 0 15px; padding: 12px 15px; border: 1px solid #cfe7d6; border-radius: 10px; background: #edf8f0; color: #20583c; }
         .notice.warning { border-color: #f2d4ba; background: #fff6ed; color: #8d401c; }
@@ -165,6 +167,16 @@
                         @endforeach
                     </select>
 
+                    @role('admin')
+                        <label for="current_semester">Текущ семестър</label>
+                        <select id="current_semester" name="current_semester" onchange="this.form.submit()">
+                            <option value="">Всички</option>
+                            @foreach([1, 2, 3, 4] as $semester)
+                                <option value="{{ $semester }}" @selected($currentSemester === $semester)>Текущ семестър {{ $semester }}</option>
+                            @endforeach
+                        </select>
+                    @endrole
+
                     <label for="academic_year">Учебна година</label>
                     <input id="academic_year" name="academic_year" value="{{ $academicYear }}" placeholder="2026/2027" required>
 
@@ -189,12 +201,13 @@
                                 @php
                                     $subjectEntries = $entries->where('subject_id', $curriculumSubject->subject_id);
                                     $scheduledSemesterHours = $subjectEntries->sum('duration_hours') * 5;
+                                    $hourValues = $curriculumSubject->hourValues();
                                     $plannedSemesterHours = max(
-                                        (int) $curriculumSubject->subject->auditorium_hours,
-                                        (int) $curriculumSubject->subject->lecture_hours + (int) $curriculumSubject->subject->exercise_hours,
-                                    ) + (int) $curriculumSubject->subject->self_study_hours;
+                                        $hourValues['auditorium_hours'],
+                                        $hourValues['lecture_hours'] + $hourValues['exercise_hours'],
+                                    ) + $hourValues['self_study_hours'];
                                 @endphp
-                                <li>{{ $curriculumSubject->subject->name }} · АЗ {{ $curriculumSubject->subject->auditorium_hours }} · Л {{ $curriculumSubject->subject->lecture_hours }} · У {{ $curriculumSubject->subject->exercise_hours }} · самоподготовка {{ $curriculumSubject->subject->self_study_hours }} · общо {{ $plannedSemesterHours }} ч. · в графика {{ $scheduledSemesterHours }} ч.</li>
+                                <li>{{ $curriculumSubject->subject->name }} · АЗ {{ $hourValues['auditorium_hours'] }} · Л {{ $hourValues['lecture_hours'] }} · У {{ $hourValues['exercise_hours'] }} · самоподготовка {{ $hourValues['self_study_hours'] }} · общо {{ $plannedSemesterHours }} ч. · в графика {{ $scheduledSemesterHours }} ч.</li>
                             @empty
                                 <li>Няма дисциплини за избрания курс и семестър.</li>
                             @endforelse
@@ -239,12 +252,9 @@
                                         @foreach($weekdays as $dayNo => $day)
                                             @php
                                                 $cellEntries = $entries->filter(function ($entry) use ($dayNo, $part, $week) {
-                                                    $start = substr($entry->start_time, 0, 5);
-                                                    $after = $part['after'] ?? null;
                                                     return $entry->cycle_week === $week
                                                         && $entry->weekday_no === $dayNo
-                                                        && ($after === null || $start >= $after)
-                                                        && ($part['before'] === null || $start < $part['before']);
+                                                        && $entry->displayDayPart() === $part['key'];
                                                 });
                                             @endphp
                                             <td class="dropzone" data-drop-week="{{ $week }}" data-drop-day="{{ $dayNo }}" data-drop-part="{{ $part['key'] }}">
@@ -274,6 +284,7 @@
                                                                     <input type="hidden" name="semester_type" value="{{ $semesterType }}">
                                                                     <input type="hidden" name="cycle_week" value="{{ $entry->cycle_week }}">
                                                                     <input type="hidden" name="weekday_no" value="{{ $entry->weekday_no }}">
+                                                                    <input type="hidden" name="day_part" value="{{ $entry->displayDayPart() }}">
                                                                     <label>Начален час<input type="time" name="start_time" value="{{ substr($entry->start_time, 0, 5) }}" required></label>
                                                                     <label>Краен час<input type="time" name="end_time" value="{{ substr($entry->end_time, 0, 5) }}" required></label>
                                                                     <label>Учебни часове<input class="computed-duration" type="number" name="duration_hours" min="1" max="16" value="{{ $entry->duration_hours }}" readonly required></label>
@@ -352,7 +363,7 @@
                             <input type="hidden" name="semester_type" value="{{ $semesterType }}">
                             <button class="button" type="submit">Презареди данните без преместване</button>
                         </form>
-                        <form method="POST" action="{{ route('schedules.generate') }}">
+                        <form method="POST" action="{{ route('schedules.generate') }}" onsubmit="return confirm('Генерирането ще изгради наново непоставените занятия за този семестър. Продължаване?')">
                             @csrf
                             <input type="hidden" name="group_id" value="{{ $selectedGroup->id }}">
                             <input type="hidden" name="academic_year" value="{{ $academicYear }}">
@@ -365,7 +376,7 @@
                             @csrf
                             <input type="hidden" name="group_id" value="{{ $selectedGroup->id }}">
                             <input type="hidden" name="academic_year" value="{{ $academicYear }}">
-                            <button class="button" type="submit">Копирай предишното зимно разписание</button>
+                            <button class="button" type="submit" onclick="return confirm('Копирането добавя занятия от предишната зима само при непроменени учебен план и възлагания. Продължаване?')">Копирай предишното зимно разписание</button>
                         </form>
                         @endif
                         <form method="POST" action="{{ route('schedules.test') }}">
@@ -432,19 +443,30 @@
         @if($selectedGroup)
             <aside class="schedule-pool" aria-label="Временен пул за занятия">
                 <header class="schedule-pool-head">
-                    <strong>Временен пул <span class="pool-count">{{ $poolEntries->count() }}</span></strong>
-                    <span class="week-caption">Плъзнете занятие към свободен блок, за да го върнете в разписанието. Преместените ръчно и непоставените автоматично остават тук.</span>
+                    <strong>Непоставени дисциплини <span class="pool-count">{{ $poolEntries->count() }}</span> · Поставени блокове {{ $entries->count() }}</strong>
+                    <span class="week-caption">Плъзнете занятие към свободен блок. Пулът остава видим при скролиране.</span>
+                    <input type="search" id="pool-search" placeholder="Търси дисциплина или преподавател" aria-label="Търси в непоставените занятия">
                 </header>
                 <div class="schedule-pool-list" id="schedule-pool-dropzone">
-                    @forelse($poolEntries as $entry)
+                    @forelse($poolEntries as $poolGroup)
+                        @php
+                            $entry = $poolGroup->entry;
+                            $formatPoolHours = fn (float $hours): string => rtrim(rtrim(number_format($hours, 2, '.', ''), '0'), '.');
+                        @endphp
                         <article class="lesson pool-entry @if($entry->student_flow_id) flow-entry @endif" draggable="true" data-entry-id="{{ $entry->id }}">
                             <span class="lesson-title">{{ $entry->subject?->name ?? $entry->custom_subject_name }}</span>
                             @if($entry->studentFlow)<span class="lesson-meta">Общ поток · {{ $entry->studentFlow->name }}</span>@endif
-                            <span class="lesson-meta">Седмица {{ $entry->cycle_week }} · {{ $weekdays[$entry->weekday_no] ?? '' }} · {{ $entry->duration_hours }} уч. ч.<br>{{ $entry->pool_reason === 'auto' ? 'Непоставено от генератора' : 'Временно извадено от администратора' }}</span>
+                            @if($poolGroup->coverage_types->isNotEmpty())
+                                <span class="lesson-meta">{{ $poolGroup->coverage_types->join(' и ') }}@if($poolGroup->teachers->isNotEmpty()) · {{ $poolGroup->teachers->join(', ') }}@endif</span>
+                            @endif
+                            <span class="lesson-meta remaining-hours">Остават {{ $poolGroup->remaining_hours }} уч. ч. за разпределяне</span>
+                            <span class="lesson-meta">АЗ {{ $formatPoolHours($poolGroup->auditorium_hours) }} ч. · Самоподготовка {{ $formatPoolHours($poolGroup->self_study_hours) }} ч.<br>
+                                {{ $poolGroup->block_count }} блока{{ $poolGroup->all_standard_blocks ? ' по 4 ч.' : '' }} · {{ $poolGroup->has_manual_blocks ? 'включва ръчно върнати занятия' : 'подготвено по учебния план' }}</span>
                             <form class="edit-form" method="POST" action="{{ route('schedules.update', $entry) }}">
                                 @csrf @method('PATCH')
                                 <input type="hidden" name="cycle_week" value="{{ $entry->cycle_week }}">
                                 <input type="hidden" name="weekday_no" value="{{ $entry->weekday_no }}">
+                                <input type="hidden" name="day_part" value="{{ $entry->displayDayPart() }}">
                                 <input type="hidden" name="start_time" value="{{ substr($entry->start_time, 0, 5) }}">
                                 <input type="hidden" name="end_time" value="{{ substr($entry->end_time, 0, 5) }}">
                                 <input type="hidden" name="duration_hours" value="{{ $entry->duration_hours }}">
@@ -517,6 +539,7 @@
                 const data = new URLSearchParams({
                     cycle_week: zone.dataset.dropWeek,
                     weekday_no: zone.dataset.dropDay,
+                    day_part: zone.dataset.dropPart,
                     start_time: formatTime(targetStartMinutes),
                     end_time: formatTime(targetEndMinutes),
                     duration_hours: form.elements.duration_hours.value,
@@ -549,6 +572,12 @@
 
         const poolDropzone = document.getElementById('schedule-pool-dropzone');
         if (poolDropzone) {
+            document.getElementById('pool-search')?.addEventListener('input', (event) => {
+                const search = event.target.value.trim().toLocaleLowerCase('bg');
+                poolDropzone.querySelectorAll('.pool-entry').forEach((entry) => {
+                    entry.hidden = !entry.textContent.toLocaleLowerCase('bg').includes(search);
+                });
+            });
             poolDropzone.addEventListener('dragover', (event) => {
                 event.preventDefault();
                 poolDropzone.classList.add('over');
