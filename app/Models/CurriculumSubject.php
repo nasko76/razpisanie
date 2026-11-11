@@ -15,12 +15,15 @@ class CurriculumSubject extends Model
         'semester_no',
         'course_year',
         'source_data',
+        'subject_category',
+        'is_selected',
     ];
 
     protected function casts(): array
     {
         return [
             'source_data' => 'array',
+            'is_selected' => 'boolean',
         ];
     }
 

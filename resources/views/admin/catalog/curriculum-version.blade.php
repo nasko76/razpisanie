@@ -31,10 +31,6 @@
         .tag { display:inline-block; padding:3px 7px; border-radius:20px; background:#e8f4ed; color:var(--green); font-size:10px; font-weight:700; }
         .empty { color:var(--muted); }
         .button { display:inline-flex; min-height:38px; align-items:center; padding:0 12px; border:1px solid var(--line); border-radius:9px; background:white; font-weight:650; }
-        details { margin-top:8px; }
-        summary { display:inline-flex; min-height:38px; align-items:center; padding:0 12px; border:1px solid var(--line); border-radius:9px; background:white; color:var(--green); font-weight:650; cursor:pointer; }
-        summary::-webkit-details-marker { display:none; }
-        details[open]>summary { margin-bottom:8px; background:#f6fbf7; }
         .record-actions { display:flex; flex-wrap:wrap; align-items:center; gap:7px; }
         .forms { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:10px; padding:16px 19px; border-bottom:1px solid var(--line); background:#fbfcfb; }
         label { display:block; color:var(--muted); font-size:11px; font-weight:700; }
@@ -57,28 +53,34 @@
         <div>
             <div class="eyebrow">Обобщен учебен план</div>
             <h1>{{ $curriculumVersion->specialty?->name }} · {{ $curriculumVersion->name }}</h1>
-            <p class="muted">Версия {{ $curriculumVersion->version_year }} · {{ $curriculumSubjects->count() }} дисциплини</p>
+            <p class="muted">Версия {{ $curriculumVersion->version_year }} · текущ семестър {{ $curriculumVersion->current_semester }} · {{ $curriculumSubjects->count() }} дисциплини</p>
         </div>
-        <div>
-            <details>
-                <summary>Действия</summary>
-                <div class="record-actions">
-                    <form method="POST" action="{{ route('catalog.curriculum-versions.duplicate', $curriculumVersion) }}">
-                        @csrf
-                        <button class="button" type="submit">Копирай план</button>
-                    </form>
-                    <form method="POST" action="{{ route('catalog.curriculum-versions.update', $curriculumVersion) }}">
-                        @csrf @method('PATCH')
-                        <button class="button" name="is_active" value="{{ $curriculumVersion->is_active ? '0' : '1' }}">{{ $curriculumVersion->is_active ? 'Архивирай' : 'Активирай' }}</button>
-                    </form>
-                    <form method="POST" action="{{ route('catalog.curriculum-versions.destroy', $curriculumVersion) }}" onsubmit="return confirm('Изтриването премахва плана и дисциплините в него. Курсовете ще останат без план. Продължаване?')">
-                        @csrf @method('DELETE')
-                        <button class="button" type="submit" style="color:#a83232">Изтрий версията</button>
-                    </form>
-                    <a class="button" href="{{ route('catalog.index', ['tab' => 'plans']) }}">Назад към плановете</a>
-                </div>
-            </details>
-        </div>
+        <nav class="record-actions" aria-label="Действия за учебния план">
+            <form method="POST" action="{{ route('catalog.curriculum-versions.duplicate', $curriculumVersion) }}">
+                @csrf
+                <button class="button" type="submit">Копирай план</button>
+            </form>
+            <form method="POST" action="{{ route('catalog.curriculum-versions.update', $curriculumVersion) }}">
+                @csrf @method('PATCH')
+                <button class="button" name="is_active" value="{{ $curriculumVersion->is_active ? '0' : '1' }}">{{ $curriculumVersion->is_active ? 'Архивирай' : 'Активирай' }}</button>
+            </form>
+            @if($curriculumVersion->current_semester < 4)
+                <form method="POST" action="{{ route('catalog.curriculum-versions.advance-semester', $curriculumVersion) }}">
+                    @csrf
+                    <button class="button" type="submit">Премини към семестър {{ $curriculumVersion->current_semester + 1 }}</button>
+                </form>
+            @elseif($curriculumVersion->is_active)
+                <form method="POST" action="{{ route('catalog.curriculum-versions.advance-semester', $curriculumVersion) }}">
+                    @csrf
+                    <button class="button" type="submit">Архивирай след 4-ти семестър</button>
+                </form>
+            @endif
+            <form method="POST" action="{{ route('catalog.curriculum-versions.destroy', $curriculumVersion) }}" onsubmit="return confirm('Изтриването премахва плана и дисциплините в него. Курсовете ще останат без план. Продължаване?')">
+                @csrf @method('DELETE')
+                <button class="button" type="submit" style="color:#a83232">Изтрий версията</button>
+            </form>
+            <a class="button" href="{{ route('catalog.index', ['tab' => 'plans']) }}">Назад към плановете</a>
+        </nav>
     </section>
 
     @if(session('status'))<div class="status">{{ session('status') }}</div>@endif
@@ -106,7 +108,7 @@
         </form>
         <div class="table-wrap">
             <table>
-                <thead><tr><th>Курс / семестър</th><th>Дисциплина</th><th>Аудиторна заетост</th><th>Самоподготовка</th><th>Общо часове</th><th>Форма на контрол</th><th>Преподавателска обезпеченост</th><th>Редакция</th></tr></thead>
+                <thead><tr><th>Курс / семестър</th><th>Дисциплина</th><th>Категория</th><th>Включена</th><th>Аудиторна заетост</th><th>Самоподготовка</th><th>Общо часове</th><th>Форма на контрол</th><th>Преподавателска обезпеченост</th><th>Редакция</th></tr></thead>
                 <tbody>
                 @forelse($curriculumSubjects as $curriculumSubject)
                     @php
@@ -133,10 +135,24 @@
                         });
                         $auditoriumHours = (int) ($curriculumSubject->subject?->auditorium_hours ?? 0);
                         $selfStudyHours = (int) ($curriculumSubject->subject?->self_study_hours ?? 0);
+                        $categoryLabels = ['mandatory' => 'Задължителна', 'elective' => 'Избираема дисциплина', 'optional' => 'Факултативна дисциплина'];
                     @endphp
                     <tr>
                         <td>{{ $curriculumSubject->course_year }} курс<br><span class="muted">{{ $curriculumSubject->semester_no }} семестър</span></td>
-                        <td><strong>{{ $curriculumSubject->subject?->name }}</strong><br><span class="muted">{{ $curriculumSubject->subject?->code }}</span></td>
+                        <td><strong><a href="{{ route('catalog.index', ['tab' => 'subjects', 'subject_id' => $curriculumSubject->subject_id]) }}#subject-{{ $curriculumSubject->subject_id }}">{{ $curriculumSubject->subject?->name }}</a></strong><br><span class="muted">{{ $curriculumSubject->subject?->code }}</span></td>
+                        <td>{{ $categoryLabels[$curriculumSubject->subject_category] ?? 'Задължителна' }}</td>
+                        <td>
+                            @if($curriculumSubject->subject_category === 'mandatory')
+                                <span class="tag">Винаги включена</span>
+                            @else
+                                <form method="POST" action="{{ route('catalog.curriculum-subjects.selection.update', $curriculumSubject) }}" class="selection-form">
+                                    @csrf @method('PATCH')
+                                    <input type="hidden" name="is_selected" value="{{ $curriculumSubject->is_selected ? '0' : '1' }}">
+                                    <button class="button" type="submit">{{ $curriculumSubject->is_selected ? 'Изключи' : 'Включи' }}</button>
+                                    <span class="muted">{{ $curriculumSubject->is_selected ? 'Участва в генерирането' : 'Не участва в генерирането' }}</span>
+                                </form>
+                            @endif
+                        </td>
                         <td class="hours">{{ $auditoriumHours }} ч.<br><span class="muted">Л {{ $curriculumSubject->subject?->lecture_hours }} · У {{ $curriculumSubject->subject?->exercise_hours }}</span></td>
                         <td>{{ $selfStudyHours }} ч.</td>
                         <td><strong>{{ $auditoriumHours + $selfStudyHours }} ч.</strong></td>
@@ -165,6 +181,7 @@
                                     @csrf @method('PATCH')
                                     <label>Курс<input name="course_year" type="number" min="1" max="6" value="{{ $curriculumSubject->course_year }}" required></label>
                                     <label>Семестър<input name="semester_no" type="number" min="1" max="12" value="{{ $curriculumSubject->semester_no }}" required></label>
+                                    <label>Категория<select name="subject_category" required>@foreach(['mandatory' => 'Задължителна', 'elective' => 'Избираема', 'optional' => 'Факултативна'] as $value => $label)<option value="{{ $value }}" @selected($curriculumSubject->subject_category === $value)>{{ $label }}</option>@endforeach</select></label>
                                     <button class="button" type="submit">Запази</button>
                                 </form>
                                 <form method="POST" action="{{ route('catalog.curriculum-subjects.destroy', $curriculumSubject) }}" onsubmit="return confirm('Премахване на дисциплината от плана?')">
@@ -175,7 +192,7 @@
                         </td>
                     </tr>
                 @empty
-                    <tr><td colspan="8" class="empty">В тази версия на плана няма добавени дисциплини.</td></tr>
+                    <tr><td colspan="10" class="empty">В тази версия на плана няма добавени дисциплини.</td></tr>
                 @endforelse
                 </tbody>
             </table>

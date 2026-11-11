@@ -255,6 +255,122 @@ it('previews and confirms curriculum rows while retaining source columns and mis
         ->and($preview['rows'][0]['warnings'])->toContain(
             'Часовете за лекции (Л) липсват в източника; стойността остава неизвестна.',
         );
+    $curriculumSubject = $version->subjects()->firstOrFail();
+    expect($curriculumSubject->subject_category)->toBe('mandatory')
+        ->and($curriculumSubject->is_selected)->toBeTrue();
+});
+
+it('marks elective curriculum rows and skips elective rows without auditorium hours by default', function () {
+    $version = createStudyImportVersion();
+    $admin = createStudyImportAdmin();
+    $headers = ['Код', 'Дисциплина', 'Курс', 'Семестър', 'АЗ', 'Кредити'];
+    $rows = [
+        ['E-001', 'Избираема дисциплина: Илюстрация', '1', '1', '0', '2'],
+        ['F-001', 'Факултативна дисциплина: Калиграфия', '1', '1', '', '2'],
+        ['M-001', 'Рисуване', '1', '1', '60', '2'],
+    ];
+    $html = '<html><table><tr>'.implode('', array_map(fn (string $header): string => '<th>'.$header.'</th>', $headers)).'</tr>'
+        .implode('', array_map(
+            fn (array $row): string => '<tr>'.implode('', array_map(fn (string $cell): string => '<td>'.$cell.'</td>', $row)).'</tr>',
+            $rows,
+        )).'</table></html>';
+
+    $response = $this->actingAs($admin)
+        ->post(route('imports.preview'), [
+            'kind' => 'curriculum',
+            'curriculum_version_id' => $version->id,
+            'file' => UploadedFile::fake()->createWithContent('plan.html', $html),
+        ])
+        ->assertOk();
+    $previewRows = $response->viewData('preview')['rows'];
+
+    expect($previewRows[0]['subject_category'])->toBe('elective')
+        ->and($previewRows[0]['default_skip'])->toBeTrue()
+        ->and($previewRows[1]['subject_category'])->toBe('optional')
+        ->and($previewRows[1]['default_skip'])->toBeTrue()
+        ->and($previewRows[2]['subject_category'])->toBe('mandatory')
+        ->and($previewRows[2]['default_skip'])->toBeFalse();
+
+    $this->post(route('imports.confirm'), [
+        'token' => $response->viewData('token'),
+        'subjects' => [0 => 'create', 1 => 'skip', 2 => 'create'],
+    ])->assertRedirect(route('catalog.index'));
+
+    $this->assertDatabaseHas('curriculum_subjects', [
+        'subject_category' => 'elective',
+        'is_selected' => false,
+    ]);
+    $this->assertDatabaseHas('curriculum_subjects', [
+        'subject_category' => 'mandatory',
+        'is_selected' => true,
+    ]);
+    $this->assertDatabaseCount('curriculum_subjects', 2);
+
+    $electiveCurriculumSubject = $version->subjects()
+        ->where('subject_category', 'elective')
+        ->firstOrFail();
+    $this->patch(route('catalog.curriculum-subjects.selection.update', $electiveCurriculumSubject), [
+        'is_selected' => true,
+    ])->assertRedirect();
+    $repeat = submitStudyImportPreview('curriculum', $version, $html)->assertOk();
+    $this->post(route('imports.confirm'), [
+        'token' => $repeat->viewData('token'),
+        'subjects' => [
+            0 => (string) Subject::query()->where('code', 'E-001')->value('id'),
+            1 => 'skip',
+            2 => (string) Subject::query()->where('code', 'M-001')->value('id'),
+        ],
+    ])->assertRedirect(route('catalog.index'));
+
+    $this->assertDatabaseCount('curriculum_subjects', 2);
+    expect($electiveCurriculumSubject->fresh()->is_selected)->toBeTrue();
+});
+
+it('reads elective and optional section headings and resets to mandatory after semester summaries', function () {
+    $version = createStudyImportVersion();
+    $headers = ['Код', 'Наименование', 'Курс', 'Сем.', 'АЗ', 'Л', 'У'];
+    $html = '<html><table><tr>'.implode('', array_map(fn (string $header): string => '<th>'.$header.'</th>', $headers)).'</tr>'
+        .'<tr><td colspan="7"><b>Избираема дисциплина 3 - избира се 1 дисциплина/блок</b></td></tr>'
+        .'<tr><td>E-101</td><td>Типография</td><td>3</td><td>5</td><td>30</td><td>30</td><td>0</td></tr>'
+        .'<tr><td colspan="7"><b>Пояснение за вида и семестъра</b></td></tr>'
+        .'<tr><td colspan="7"><b>Факултативна дисциплина 2 - избира се 1 дисциплина/блок</b></td></tr>'
+        .'<tr><td>F-101</td><td>Калиграфия</td><td>3</td><td>5</td><td>30</td><td>0</td><td>30</td></tr>'
+        .'<tr><td>0</td><td>Всичко за ПЕТИ СЕМЕСТЪР - всички</td><td>3</td><td>5</td><td>60</td><td>30</td><td>30</td></tr>'
+        .'<tr><td>M-101</td><td>Практика</td><td>3</td><td>5</td><td>60</td><td>0</td><td>60</td></tr>'
+        .'</table></html>';
+
+    $response = $this->actingAs(createStudyImportAdmin())
+        ->post(route('imports.preview'), [
+            'kind' => 'curriculum',
+            'curriculum_version_id' => $version->id,
+            'file' => UploadedFile::fake()->createWithContent('categorized-plan.html', $html),
+        ])
+        ->assertOk();
+    $rows = $response->viewData('preview')['rows'];
+
+    expect($rows)->toHaveCount(4)
+        ->and($rows[0]['subject_name'])->toBe('Типография')
+        ->and($rows[0]['subject_category'])->toBe('elective')
+        ->and($rows[1]['subject_category'])->toBe('optional')
+        ->and($rows[2]['valid'])->toBeFalse()
+        ->and($rows[2]['warnings'])->toContain('Редът е обобщение за семестър, а не дисциплина; не може да бъде записан.')
+        ->and($rows[3]['subject_category'])->toBe('mandatory');
+
+    $this->post(route('imports.confirm'), [
+        'token' => $response->viewData('token'),
+        'subjects' => [0 => 'create', 1 => 'create', 2 => 'skip', 3 => 'create'],
+    ])->assertRedirect(route('catalog.index'));
+
+    expect($version->subjects()->orderBy('subject_id')->pluck('subject_category')->all())
+        ->toContain('elective', 'optional', 'mandatory');
+    $this->assertDatabaseHas('curriculum_subjects', [
+        'subject_category' => 'elective',
+        'is_selected' => false,
+    ]);
+    $this->assertDatabaseHas('curriculum_subjects', [
+        'subject_category' => 'optional',
+        'is_selected' => false,
+    ]);
 });
 
 it('maps identified study-plan fields and preserves the remaining 24-column source row', function () {

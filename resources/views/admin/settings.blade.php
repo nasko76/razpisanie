@@ -25,6 +25,7 @@
         .setting input { width:20px; height:20px; accent-color:var(--green); }
         .button { display:inline-flex; min-height:38px; align-items:center; justify-content:center; padding:0 12px; border:1px solid var(--line); border-radius:9px; background:#fff; font-weight:650; cursor:pointer; }
         .button.primary { border-color:var(--green); background:var(--green); color:#fff; }
+        .button.danger { color:#a83232; }
         .notice { margin-bottom:14px; padding:12px 14px; border:1px solid #cfe7d6; border-radius:10px; background:#edf8f0; color:#20583c; }
         .errors { border-color:#efc7b5; background:#fff6ef; color:#8d401c; }
     </style>
@@ -59,6 +60,7 @@
             <button class="button primary" type="submit" style="margin-top:18px">Запази настройките</button>
         </form>
     </section>
+
 </main>
 </body>
 </html>

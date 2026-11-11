@@ -28,16 +28,49 @@ class CatalogController extends Controller
         $activeTab = in_array($activeTab, ['plans', 'subjects', 'teachers', 'organization'], true)
             ? $activeTab
             : 'plans';
+        $subjectSort = in_array($request->query('subject_sort'), ['name', 'auditorium_hours', 'code'], true)
+            ? $request->query('subject_sort')
+            : 'name';
+        $subjectCurriculumFilter = in_array($request->query('subject_in_curriculum'), ['included', 'not_included'], true)
+            ? $request->query('subject_in_curriculum')
+            : '';
+        $subjectPlanId = $request->integer('subject_plan_id');
+        $teacherPlanId = $request->integer('teacher_plan_id');
+        $subjectsQuery = Subject::query()->withCount('curriculumSubjects');
+        if ($subjectPlanId > 0) {
+            $subjectsQuery->whereHas('curriculumSubjects', fn ($query) => $query->where('curriculum_version_id', $subjectPlanId));
+        } elseif ($subjectCurriculumFilter === 'included') {
+            $subjectsQuery->has('curriculumSubjects');
+        } elseif ($subjectCurriculumFilter === 'not_included') {
+            $subjectsQuery->doesntHave('curriculumSubjects');
+        }
+        if ($subjectSort === 'auditorium_hours') {
+            $subjectsQuery->orderByDesc('auditorium_hours')->orderBy('name');
+        } else {
+            $subjectsQuery->orderBy($subjectSort)->orderBy('name');
+        }
+        $teachersQuery = Teacher::query()->with('absences')->withCount('assignments')->orderBy('last_name');
+        if ($teacherPlanId > 0) {
+            $teachersQuery->where(function ($query) use ($teacherPlanId): void {
+                $query->whereHas('assignments', fn ($assignments) => $assignments->where('curriculum_version_id', $teacherPlanId))
+                    ->orWhereHas('assignments.studentGroup', fn ($group) => $group->where('curriculum_version_id', $teacherPlanId))
+                    ->orWhereHas('assignments.studentFlow.groups', fn ($group) => $group->where('curriculum_version_id', $teacherPlanId));
+            });
+        }
 
         return view('admin.catalog', [
             'specialties' => Specialty::query()->withCount('curriculumVersions')->orderBy('name')->get(),
             'curriculumVersions' => CurriculumVersion::query()->with('specialty')->withCount('subjects')->orderByDesc('version_year')->get(),
             'groups' => StudentGroup::query()->with(['specialty', 'curriculumVersion'])->orderBy('course_year')->orderBy('group_name')->get(),
-            'subjects' => Subject::query()->withCount('curriculumSubjects')->orderBy('name')->get(),
-            'teachers' => Teacher::query()->with('absences')->withCount('assignments')->orderBy('last_name')->get(),
+            'subjects' => $subjectsQuery->get(),
+            'teachers' => $teachersQuery->get(),
             'rooms' => Room::query()->orderBy('name')->get(),
             'studentFlows' => StudentFlow::query()->with(['groups.specialty', 'subject'])->withCount('groups')->orderBy('name')->get(),
             'activeTab' => $activeTab,
+            'subjectSort' => $subjectSort,
+            'subjectCurriculumFilter' => $subjectCurriculumFilter,
+            'subjectPlanId' => $subjectPlanId,
+            'teacherPlanId' => $teacherPlanId,
         ]);
     }
 
@@ -83,6 +116,7 @@ class CatalogController extends Controller
             'version_year' => ['required', 'integer', 'min:2000', 'max:2200'],
             'active_from' => ['nullable', 'date'],
             'active_to' => ['nullable', 'date', 'after_or_equal:active_from'],
+            'current_semester' => ['sometimes', 'integer', 'between:1,4'],
             'is_active' => ['sometimes', 'boolean'],
         ]);
 
@@ -131,11 +165,38 @@ class CatalogController extends Controller
             'version_year' => ['required', 'integer', 'min:2000', 'max:2200'],
             'active_from' => ['nullable', 'date'],
             'active_to' => ['nullable', 'date', 'after_or_equal:active_from'],
+            'current_semester' => ['sometimes', 'integer', 'between:1,4'],
         ]);
         $curriculumVersion->update($data);
 
         return redirect()->route('catalog.curriculum-versions.show', $curriculumVersion)
             ->with('status', 'Данните за учебния план са обновени.');
+    }
+
+    public function advanceCurriculumSemester(CurriculumVersion $curriculumVersion): RedirectResponse
+    {
+        $status = DB::transaction(function () use ($curriculumVersion): string {
+            $version = CurriculumVersion::query()
+                ->lockForUpdate()
+                ->findOrFail($curriculumVersion->id);
+
+            if ($version->current_semester < 4) {
+                $version->increment('current_semester');
+
+                return 'Текущият семестър е преместен към '.$version->current_semester.'.';
+            }
+
+            if ($version->is_active) {
+                $version->update(['is_active' => false]);
+
+                return 'Версията е в четвърти семестър и е архивирана.';
+            }
+
+            return 'Версията вече е архивирана.';
+        });
+
+        return redirect()->route('catalog.curriculum-versions.show', $curriculumVersion)
+            ->with('status', $status);
     }
 
     public function destroyCurriculumVersion(CurriculumVersion $curriculumVersion): RedirectResponse
@@ -158,6 +219,8 @@ class CatalogController extends Controller
                     'course_year' => $subject->course_year,
                     'semester_no' => $subject->semester_no,
                     'source_data' => $subject->source_data,
+                    'subject_category' => $subject->subject_category,
+                    'is_selected' => $subject->is_selected,
                 ])->all(),
             );
         });
@@ -187,11 +250,37 @@ class CatalogController extends Controller
         $data = $request->validate([
             'course_year' => ['required', 'integer', 'between:1,6'],
             'semester_no' => ['required', 'integer', 'between:1,12'],
+            'subject_category' => ['required', Rule::in(['mandatory', 'elective', 'optional'])],
         ]);
+        $categoryChanged = $curriculumSubject->subject_category !== $data['subject_category'];
+        $data['is_selected'] = match (true) {
+            $data['subject_category'] === 'mandatory' => true,
+            $categoryChanged => false,
+            default => $curriculumSubject->is_selected,
+        };
         $curriculumSubject->update($data);
 
         return redirect()->route('catalog.curriculum-versions.show', $curriculumSubject->curriculum_version_id)
             ->with('status', 'Дисциплината е обновена в учебния план.');
+    }
+
+    public function updateCurriculumSubjectSelection(Request $request, CurriculumSubject $curriculumSubject): RedirectResponse
+    {
+        $data = $request->validate([
+            'is_selected' => ['required', 'boolean'],
+        ]);
+        if ($curriculumSubject->subject_category === 'mandatory') {
+            throw ValidationException::withMessages([
+                'is_selected' => 'Задължителните дисциплини не могат да бъдат изключени от учебния план.',
+            ]);
+        }
+
+        $curriculumSubject->update(['is_selected' => (bool) $data['is_selected']]);
+
+        return redirect()->route('catalog.curriculum-versions.show', $curriculumSubject->curriculum_version_id)
+            ->with('status', $data['is_selected']
+                ? 'Избираемата дисциплина е включена в генерирането на разписанието.'
+                : 'Дисциплината е изключена от генерирането на разписанието.');
     }
 
     public function destroyCurriculumSubject(CurriculumSubject $curriculumSubject): RedirectResponse
@@ -296,7 +385,7 @@ class CatalogController extends Controller
             'first_name' => ['required', 'string', 'max:100'],
             'last_name' => ['required', 'string', 'max:100'],
             'title' => ['nullable', 'string', 'max:100'],
-            'max_daily_hours' => ['required', 'integer', 'between:1,16'],
+            'max_daily_hours' => ['required', 'integer', 'between:1,10'],
             'weekly_workload_hours' => ['required', 'integer', 'between:0,80'],
         ]);
 
@@ -314,7 +403,7 @@ class CatalogController extends Controller
             'first_name' => ['required', 'string', 'max:100'],
             'last_name' => ['required', 'string', 'max:100'],
             'title' => ['nullable', 'string', 'max:100'],
-            'max_daily_hours' => ['required', 'integer', 'between:1,16'],
+            'max_daily_hours' => ['required', 'integer', 'between:1,10'],
             'weekly_workload_hours' => ['required', 'integer', 'between:0,80'],
             'active' => ['required', 'boolean'],
         ]);

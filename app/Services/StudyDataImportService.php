@@ -112,23 +112,36 @@ class StudyDataImportService
                         'control_type' => $row['normalized_control_type'],
                     ]);
 
-                    if ($exists) {
-                        $skipped++;
-
-                        continue;
-                    }
-
-                    CurriculumSubject::query()->create([
+                    $curriculumSubject = CurriculumSubject::query()->firstOrNew([
                         'curriculum_version_id' => $version->id,
                         'subject_id' => $subject->id,
                         'semester_no' => $row['semester_no'],
                         'course_year' => $row['course_year'],
+                    ]);
+                    $wasExisting = $curriculumSubject->exists;
+                    $curriculumSubject->fill([
+                        'subject_category' => $row['subject_category'],
                         'source_data' => [
                             'columns' => $row['source'],
                             'warnings' => $row['warnings'],
                         ],
                     ]);
-                    $created++;
+                    if (! $wasExisting) {
+                        $curriculumSubject->is_selected = $row['subject_category'] === 'mandatory';
+                    }
+
+                    if ($exists && ! $curriculumSubject->isDirty()) {
+                        $skipped++;
+
+                        continue;
+                    }
+
+                    $curriculumSubject->save();
+                    if ($wasExisting) {
+                        $updated++;
+                    } else {
+                        $created++;
+                    }
 
                     continue;
                 }
@@ -212,10 +225,30 @@ class StudyDataImportService
 
         $subjects = Subject::query()->get(['id', 'code', 'name']);
         $result = [];
+        $currentCategory = 'mandatory';
 
         foreach ($dataRows as $cells) {
-            $source = $this->sourceColumns($headers, $cells);
             $name = $this->cell($cells, $indexes['name']);
+            $normalizedName = $this->normalize($name);
+            $isSemesterSummary = preg_match('/^всичко за .+ семестър всички$/u', $normalizedName) === 1;
+            $boldText = $this->normalize(implode(' ', array_column(
+                array_filter($cells, fn (array $cell): bool => $cell['bold']),
+                'text',
+            )));
+            if ($isSemesterSummary) {
+                $currentCategory = 'mandatory';
+            } elseif (str_contains($boldText, 'избираем')) {
+                $currentCategory = 'elective';
+
+                continue;
+            } elseif (str_contains($boldText, 'факултатив')) {
+                $currentCategory = 'optional';
+
+                continue;
+            } elseif (array_filter($cells, fn (array $cell): bool => $cell['bold']) !== []) {
+                continue;
+            }
+            $source = $this->sourceColumns($headers, $cells);
             $code = $this->cell($cells, $indexes['code']);
 
             if ($name === '' && $code === '') {
@@ -236,14 +269,9 @@ class StudyDataImportService
             $scheduledHours = $this->number($this->cell($cells, $indexes['scheduled_hours']));
             $controlType = $this->cell($cells, $indexes['control_type']) ?: null;
             $normalizedControlType = $this->normalizeControlType($controlType);
+            $subjectCategory = $this->curriculumSubjectCategory($name, $currentCategory);
             $candidateSubjects = $this->findSubjectCandidates($subjects, $code, $name);
             $warnings = [];
-            $isSemesterSummary = $code === '0'
-                && preg_match(
-                    '/^(?:всичко за )?(?:първи|втори|трети|четвърти|пети|шести|седми|осми) семестър всички$/u',
-                    $this->normalize($name),
-                ) === 1;
-
             if ($semesterNo === null) {
                 $warnings[] = 'Не е разпознат валиден номер на семестър; редът не може да бъде записан.';
             }
@@ -301,6 +329,8 @@ class StudyDataImportService
                 'scheduled_hours' => $scheduledHours,
                 'control_type' => $controlType,
                 'normalized_control_type' => $normalizedControlType,
+                'subject_category' => $subjectCategory,
+                'default_skip' => $subjectCategory !== 'mandatory' && ($auditoriumHours === null || $auditoriumHours === 0),
                 'subject_candidates' => $candidateSubjects,
                 'status' => $duplicate ? 'already_imported' : $this->candidateStatus($candidateSubjects),
                 'valid' => $name !== ''
@@ -315,6 +345,19 @@ class StudyDataImportService
         }
 
         return $result;
+    }
+
+    private function curriculumSubjectCategory(string $name, string $currentCategory = 'mandatory'): string
+    {
+        $normalizedName = $this->normalize($name);
+
+        return match (true) {
+            str_starts_with($normalizedName, 'избираема дисциплина'),
+            str_starts_with($normalizedName, 'избираеми дисциплини') => 'elective',
+            str_starts_with($normalizedName, 'факултативна дисциплина'),
+            str_starts_with($normalizedName, 'факултативни дисциплини') => 'optional',
+            default => $currentCategory,
+        };
     }
 
     /**

@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Models\SoftwareSetting;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 use Illuminate\View\View;
 
 class SoftwareSettingsController extends Controller
@@ -22,10 +23,12 @@ class SoftwareSettingsController extends Controller
             'public_schedule_notice' => ['nullable', 'string', 'max:1000'],
         ]);
 
-        SoftwareSetting::query()->updateOrCreate(
-            ['key' => 'public_schedule_notice'],
-            ['value' => $data['public_schedule_notice'] ?? ''],
-        );
+        DB::transaction(function () use ($data): void {
+            SoftwareSetting::query()->updateOrCreate(
+                ['key' => 'public_schedule_notice'],
+                ['value' => $data['public_schedule_notice'] ?? ''],
+            );
+        });
 
         return redirect()
             ->route('settings.index')

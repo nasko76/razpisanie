@@ -23,8 +23,22 @@ class TimetableEntry extends Model
         'start_time',
         'end_time',
         'duration_hours',
+        'is_in_pool',
+        'pool_reason',
+        'auditorium_hours',
+        'self_study_hours',
         'locked',
     ];
+
+    protected function casts(): array
+    {
+        return [
+            'is_in_pool' => 'boolean',
+            'locked' => 'boolean',
+            'auditorium_hours' => 'decimal:2',
+            'self_study_hours' => 'decimal:2',
+        ];
+    }
 
     public function group(): BelongsTo
     {

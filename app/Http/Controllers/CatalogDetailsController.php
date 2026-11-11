@@ -8,6 +8,7 @@ use App\Models\StudentFlow;
 use App\Models\Subject;
 use App\Models\Teacher;
 use App\Models\TeacherAssignment;
+use App\Models\TimetableEntry;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\View\View;
 
@@ -75,6 +76,21 @@ class CatalogDetailsController extends Controller
             ->orderBy('semester_no')
             ->get();
         $studentFlows = StudentFlow::query()->with(['groups.specialty', 'subject'])->whereNotNull('subject_id')->orderBy('name')->get();
+        $teacherScheduleLoads = TimetableEntry::query()
+            ->where('teacher_id', $teacher->id)
+            ->with([
+                'subject',
+                'group.specialty',
+                'group.curriculumVersion.subjects',
+                'studentFlow.groups.specialty',
+                'studentFlow.groups.curriculumVersion.subjects',
+            ])
+            ->orderByDesc('academic_year')
+            ->orderBy('semester_type')
+            ->orderBy('cycle_week')
+            ->orderBy('weekday_no')
+            ->orderBy('start_time')
+            ->get();
 
         return view('admin.catalog.teacher', compact(
             'teacher',
@@ -83,6 +99,7 @@ class CatalogDetailsController extends Controller
             'days',
             'curriculumSubjects',
             'studentFlows',
+            'teacherScheduleLoads',
         ));
     }
 

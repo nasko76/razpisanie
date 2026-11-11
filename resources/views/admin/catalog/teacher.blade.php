@@ -19,6 +19,7 @@
         h1 { margin:5px 0; font-size:clamp(25px,3vw,34px); letter-spacing:-.04em; }
         h2 { margin:0; font-size:16px; }
         .muted { color:var(--muted); font-size:12px; }
+        .warning { margin-bottom:14px; padding:12px 14px; border:1px solid #efc7b5; border-radius:10px; background:#fff6ef; color:#8d401c; }
         .card { overflow:hidden; margin-bottom:16px; border:1px solid var(--line); border-radius:14px; background:var(--paper); box-shadow:0 6px 24px rgba(32,54,41,.035); }
         .card-head { padding:17px 19px; border-bottom:1px solid var(--line); }
         .card-body { padding:18px 19px; }
@@ -46,6 +47,10 @@
         .edit-form label { margin:0; }
         .edit-form .span { grid-column:1/-1; }
         .table-wrap { overflow-x:auto; }
+        .schedule-matrix { min-width:900px; table-layout:fixed; }
+        .schedule-matrix td { min-width:110px; background:#fbfcfb; }
+        .schedule-matrix td:first-child { width:125px; background:#f6f8f6; font-weight:750; }
+        .load-entry { display:block; margin:4px 0; padding:7px; border-left:3px solid var(--green); border-radius:6px; background:#edf8f0; }
         table { width:100%; border-collapse:collapse; }
         th,td { padding:11px 12px; border-bottom:1px solid var(--line); text-align:left; vertical-align:middle; }
         th { color:var(--muted); font-size:10px; text-transform:uppercase; letter-spacing:.06em; }
@@ -64,6 +69,7 @@
     </header>
 
     @if(session('status'))<div class="notice">{{ session('status') }}</div>@endif
+    @if(session('warning'))<div class="warning">{{ session('warning') }}</div>@endif
     @if($errors->any())
         <div class="notice form-errors">Проверете въведените данни: {{ $errors->first() }}</div>
     @endif
@@ -84,10 +90,14 @@
             <label>Име<input name="first_name" value="{{ $teacher->first_name }}" required maxlength="100"></label>
             <label>Фамилия<input name="last_name" value="{{ $teacher->last_name }}" required maxlength="100"></label>
             <label class="span">Академична длъжност<input name="title" value="{{ $teacher->title }}" maxlength="100"></label>
-            <label>Максимум часове на ден<input name="max_daily_hours" type="number" min="1" max="16" value="{{ $teacher->max_daily_hours }}" required></label>
+            <label>Максимум часове на ден<input name="max_daily_hours" type="number" min="1" max="10" value="{{ min(10, $teacher->max_daily_hours) }}" required></label>
             <label>Натовареност на седмица<input name="weekly_workload_hours" type="number" min="0" max="80" value="{{ $teacher->weekly_workload_hours }}" required></label>
             <label>Статус<select name="active"><option value="1" @selected($teacher->active)>Активен</option><option value="0" @selected(!$teacher->active)>Неактивен</option></select></label>
             <button class="button primary" type="submit">Запази данните</button>
+        </form>
+        <form class="card-body" method="POST" action="{{ route('catalog.teachers.destroy', $teacher) }}" onsubmit="return confirm('Преподавателят ще бъде премахнат от обезпечеността; часовете в разписанията ще останат без преподавател. Продължаване?')">
+            @csrf @method('DELETE')
+            <button class="button danger" type="submit">Изтрий преподавателя</button>
         </form>
     </section>
 
@@ -103,7 +113,9 @@
                     <legend>Седмица {{ $cycleWeek }}</legend>
                     <div class="days">
                         @foreach($days as $weekday => $day)
-                            @php($current = $dayPreferences->get($cycleWeek)?->get($weekday) ?? ($weekday >= 6 ? 'unavailable' : 'neutral'))
+                            @php
+                                $current = $dayPreferences->get($cycleWeek)?->get($weekday) ?? ($weekday >= 6 ? 'unavailable' : 'neutral');
+                            @endphp
                             <fieldset class="day">
                                 <legend class="day-name">{{ $day }}</legend>
                                 @foreach(['preferred' => 'Предпочитам', 'neutral' => 'Без предпоч.', 'unavailable' => 'Не'] as $state => $label)
@@ -119,6 +131,113 @@
             @endforeach
             <button class="button primary" type="submit" style="margin-top:15px">Запази предпочитанията</button>
         </form>
+        <div class="card-body" style="padding-top:0">
+            <h2>Поставени часове по разписания</h2>
+            @php
+                $placedTeacherEntries = $teacherScheduleLoads->where('is_in_pool', false);
+                $semesterWeeks = 5;
+                $semesterAuditoriumHours = (float) $placedTeacherEntries->sum('auditorium_hours') * $semesterWeeks;
+                $semesterSelfStudyHours = (float) $placedTeacherEntries->sum('self_study_hours') * $semesterWeeks;
+                $semesterTotalHours = $semesterAuditoriumHours + $semesterSelfStudyHours;
+            @endphp
+            <p class="muted">
+                {{ $semesterTotalHours }} часа общо за 15-седмичен семестър
+                (АЗ {{ $semesterAuditoriumHours }} ч. · самоподготовка {{ $semesterSelfStudyHours }} ч.).
+                Заданията са показани по седмица от триседмичния цикъл, ден и част от деня.
+            </p>
+            <div class="table-wrap">
+                @forelse($teacherScheduleLoads->groupBy(fn ($entry): string => $entry->academic_year.'|'.$entry->semester_type) as $scopeEntries)
+                    @php
+                        $scope = $scopeEntries->first();
+                        $dayParts = [
+                            ['label' => 'Сутрин', 'after' => null, 'before' => '12:00'],
+                            ['label' => 'Следобед', 'after' => '12:00', 'before' => '16:00'],
+                            ['label' => 'Вечер', 'after' => '16:00', 'before' => null],
+                        ];
+                    @endphp
+                    <h3 style="margin:18px 0 6px">{{ $scope->academic_year }} · {{ $scope->semester_type === 'winter' ? 'Зимен семестър' : 'Летен семестър' }}</h3>
+                    @foreach([1, 2, 3] as $cycleWeek)
+                        <fieldset class="week-grid">
+                            <legend>Седмица {{ $cycleWeek }}</legend>
+                            <div class="table-wrap">
+                                <table class="schedule-matrix">
+                                    <thead><tr><th>Част от деня</th>@foreach($days as $day)<th>{{ $day }}</th>@endforeach</tr></thead>
+                                    <tbody>
+                                    @foreach($dayParts as $part)
+                                        <tr>
+                                            <td>{{ $part['label'] }}</td>
+                                            @foreach($days as $weekday => $day)
+                                                @php
+                                                    $cellEntries = $scopeEntries->filter(function ($entry) use ($cycleWeek, $weekday, $part): bool {
+                                                        $start = substr($entry->start_time, 0, 5);
+                                                        return !$entry->is_in_pool
+                                                            && $entry->cycle_week === $cycleWeek
+                                                            && $entry->weekday_no === $weekday
+                                                            && (($part['after'] ?? null) === null || $start >= $part['after'])
+                                                            && (($part['before'] ?? null) === null || $start < $part['before']);
+                                                    });
+                                                @endphp
+                                                <td>
+                                                    @forelse($cellEntries as $entry)
+                                                        @php
+                                                            $auditoriumHours = rtrim(rtrim(number_format((float) $entry->auditorium_hours, 2, '.', ''), '0'), '.');
+                                                            $selfStudyHours = rtrim(rtrim(number_format((float) $entry->self_study_hours, 2, '.', ''), '0'), '.');
+                                                            $semesterParity = $scope->semester_type === 'winter' ? 1 : 0;
+                                                            $entryGroups = $entry->studentFlow?->groups->isNotEmpty()
+                                                                ? $entry->studentFlow->groups
+                                                                : collect([$entry->group])->filter();
+                                                            $groupLabels = $entryGroups->map(function ($scheduledGroup) use ($entry, $semesterParity): string {
+                                                                $curriculumSubject = $scheduledGroup->curriculumVersion?->subjects?->first(
+                                                                    fn ($curriculumSubject): bool => (int) $curriculumSubject->subject_id === (int) $entry->subject_id
+                                                                        && (int) $curriculumSubject->course_year === (int) $scheduledGroup->course_year
+                                                                        && (int) $curriculumSubject->semester_no % 2 === $semesterParity,
+                                                                );
+                                                                $semesterNo = $curriculumSubject?->semester_no ?? '—';
+                                                                $groupName = $scheduledGroup->group_name
+                                                                    ? 'група '.$scheduledGroup->group_name
+                                                                    : 'общ курс';
+
+                                                                return $scheduledGroup->course_year.' курс · семестър '.$semesterNo.' · '
+                                                                    .($scheduledGroup->specialty?->name ?? 'Специалност не е зададена').' · '.$groupName;
+                                                            })->join('; ');
+                                                            $coverageLabel = match ($entry->coverage_type) {
+                                                                'lecture' => 'Лекции',
+                                                                'exercise' => 'Упражнения',
+                                                                default => 'Занятие',
+                                                            };
+                                                        @endphp
+                                                        <span class="load-entry">
+                                                            <strong>{{ $entry->subject?->name ?? $entry->custom_subject_name }}</strong><br>
+                                                            <span class="muted">{{ substr($entry->start_time, 0, 5) }}–{{ substr($entry->end_time, 0, 5) }} · {{ $entry->duration_hours }} уч. ч.</span><br>
+                                                            <span class="muted">{{ $coverageLabel }} · {{ $groupLabels }}</span><br>
+                                                            <span class="muted">АЗ {{ $auditoriumHours }} ч. · Самоподготовка {{ $selfStudyHours }} ч.</span>
+                                                        </span>
+                                                    @empty
+                                                        <span class="muted">—</span>
+                                                    @endforelse
+                                                </td>
+                                            @endforeach
+                                        </tr>
+                                    @endforeach
+                                    </tbody>
+                                </table>
+                            </div>
+                        </fieldset>
+                    @endforeach
+                @empty
+                    <p class="empty">Няма поставени часове в разписанията.</p>
+                @endforelse
+                @php
+                    $pooledTeacherEntries = $teacherScheduleLoads->where('is_in_pool', true);
+                @endphp
+                @if($pooledTeacherEntries->isNotEmpty())
+                    <h3 style="margin-top:20px">Във временния пул</h3>
+                    @foreach($pooledTeacherEntries as $entry)
+                        <p class="muted">{{ $entry->subject?->name ?? $entry->custom_subject_name }} · {{ $entry->academic_year }} · седмица {{ $entry->cycle_week }} · {{ $days[$entry->weekday_no] ?? '' }} · {{ $entry->duration_hours }} уч. ч.</p>
+                    @endforeach
+                @endif
+            </div>
+        </div>
     </section>
 
     <section class="card">

@@ -66,8 +66,22 @@ class ScheduleController extends Controller
                 })
                 ->where('academic_year', $academicYear)
                 ->where('semester_type', $semesterType)
+                ->where('is_in_pool', false)
                 ->orderBy('weekday_no')
                 ->orderBy('cycle_week')
+                ->orderBy('start_time')
+                ->get();
+            $poolEntries = TimetableEntry::query()
+                ->with(['subject', 'teacher', 'room', 'studentFlow'])
+                ->where(function ($query) use ($selectedGroup): void {
+                    $query->where('group_id', $selectedGroup->id)
+                        ->orWhereHas('studentFlow.groups', fn ($groupsQuery) => $groupsQuery->whereKey($selectedGroup->id));
+                })
+                ->where('academic_year', $academicYear)
+                ->where('semester_type', $semesterType)
+                ->where('is_in_pool', true)
+                ->orderBy('cycle_week')
+                ->orderBy('weekday_no')
                 ->orderBy('start_time')
                 ->get();
         }
@@ -85,6 +99,7 @@ class ScheduleController extends Controller
                 ->where('semester_type', $semesterType)
                 ->value('note'),
             'entries' => $entries,
+            'poolEntries' => $poolEntries ?? collect(),
             'teachers' => Teacher::query()->where('active', true)->orderBy('last_name')->get(),
             'rooms' => Room::query()->where('is_active', true)->orderBy('name')->get(),
             'studentFlows' => StudentFlow::query()->with('groups')->whereNotNull('subject_id')->orderBy('name')->get(),
@@ -97,6 +112,14 @@ class ScheduleController extends Controller
             'weekdays' => ScheduleService::WEEKDAYS,
             'scheduleTested' => session('schedule_tested', false),
             'scheduleTestWarnings' => session('schedule_test_warnings', []),
+            'teacherLoads' => TimetableEntry::query()
+                ->where('academic_year', $academicYear)
+                ->where('semester_type', $semesterType)
+                ->where('is_in_pool', false)
+                ->whereNotNull('teacher_id')
+                ->selectRaw('teacher_id, SUM(duration_hours) as scheduled_hours')
+                ->groupBy('teacher_id')
+                ->pluck('scheduled_hours', 'teacher_id'),
         ]);
     }
 
@@ -111,12 +134,64 @@ class ScheduleController extends Controller
         $group = StudentGroup::query()->findOrFail($data['group_id']);
         $result = $scheduleService->generateForGroup($group, $data['academic_year'], $data['semester_type']);
 
+        $status = 'Генерирани са '.count($result['entries']).' занятия във временния пул за ръчно подреждане.'
+            .' Вече поставените общи потоци са запазени на същото място.';
+        if ($result['unscheduled'] !== []) {
+            $status .= ' Някои занятия изискват допълнителна проверка.';
+        }
+
         return redirect()->route('schedules.index', [
             'group_id' => $group->id,
             'academic_year' => $data['academic_year'],
             'semester_type' => $data['semester_type'],
         ])->with([
-            'status' => 'Генерирани са '.count($result['entries']).' занятия.',
+            'status' => $status,
+        ]);
+    }
+
+    public function copyPreviousWinter(Request $request, ScheduleService $scheduleService): RedirectResponse
+    {
+        $data = $request->validate([
+            'group_id' => ['required', 'integer', 'exists:student_groups,id'],
+            'academic_year' => ['required', 'string', 'max:20'],
+        ]);
+        $group = StudentGroup::query()->findOrFail($data['group_id']);
+        $result = $scheduleService->copyPreviousWinter($group, $data['academic_year']);
+
+        return redirect()->route('schedules.index', [
+            'group_id' => $group->id,
+            'academic_year' => $data['academic_year'],
+            'semester_type' => 'winter',
+        ])->with(
+            'status',
+            'Копирани са '.$result['copied'].' занятия от зимния семестър '.$result['source_academic_year']
+                .' в '.$data['academic_year'].'. Вече поставените целеви потоци са запазени.',
+        );
+    }
+
+    public function refresh(Request $request, ScheduleService $scheduleService): RedirectResponse
+    {
+        $data = $request->validate([
+            'group_id' => ['required', 'integer', 'exists:student_groups,id'],
+            'academic_year' => ['required', 'string', 'max:20'],
+            'semester_type' => ['required', 'in:winter,summer'],
+        ]);
+        $group = StudentGroup::query()->findOrFail($data['group_id']);
+        $result = $scheduleService->refreshForGroup($group, $data['academic_year'], $data['semester_type']);
+        $message = 'Разписанието е презаредено без преместване на запазените занятия.'
+            .' Добавени в пула: '.$result['added'].'. Преместени в пула: '.$result['pooled'].'.';
+
+        if ($result['messages'] !== []) {
+            $message .= ' '.implode(' ', $result['messages']);
+        }
+
+        return redirect()->route('schedules.index', [
+            'group_id' => $group->id,
+            'academic_year' => $data['academic_year'],
+            'semester_type' => $data['semester_type'],
+        ])->with([
+            'status' => $message,
+            'schedule_refresh_warnings' => array_values(array_unique($result['warnings'])),
         ]);
     }
 
@@ -185,7 +260,7 @@ class ScheduleController extends Controller
             'weekday_no' => ['required', 'integer', 'between:1,7'],
             'start_time' => ['required', 'date_format:H:i'],
             'end_time' => ['required', 'date_format:H:i', 'after:start_time'],
-            'duration_hours' => ['required', 'integer', 'between:1,16'],
+            'duration_hours' => ['nullable', 'integer', 'between:1,16'],
             'teacher_id' => ['nullable', 'integer', 'exists:teachers,id'],
             'room_id' => ['nullable', 'integer', 'exists:rooms,id'],
             'coverage_type' => ['nullable', 'in:lecture,exercise'],
@@ -193,12 +268,14 @@ class ScheduleController extends Controller
             'custom_subject_name' => ['nullable', 'string', 'max:255'],
             'note' => ['nullable', 'string', 'max:2000'],
             'locked' => ['sometimes', 'boolean'],
+            'is_in_pool' => ['sometimes', 'boolean'],
         ]);
 
         $data['teacher_id'] = isset($data['teacher_id']) ? (int) $data['teacher_id'] : null;
         $data['room_id'] = isset($data['room_id']) ? (int) $data['room_id'] : null;
         $data['start_time'] .= ':00';
         $data['end_time'] .= ':00';
+        $data['duration_hours'] = $scheduleService->teachingHours($data['start_time'], $data['end_time']);
         if (isset($data['student_flow_id'])) {
             $flow = StudentFlow::query()->with('groups')->findOrFail($data['student_flow_id']);
             if (
@@ -211,6 +288,7 @@ class ScheduleController extends Controller
                 ]);
             }
         }
+
         $data['locked'] = $request->boolean('locked');
 
         $scheduleService->moveEntry($entry, $data);
@@ -227,6 +305,22 @@ class ScheduleController extends Controller
         ]))->with('status', 'Промените са запазени.');
     }
 
+    public function park(Request $request, TimetableEntry $entry, ScheduleService $scheduleService): RedirectResponse|JsonResponse
+    {
+        $scheduleService->parkEntry($entry);
+
+        if ($request->expectsJson()) {
+            return response()->json(['message' => 'Занятието е преместено във временния пул.']);
+        }
+
+        return redirect()->route('schedules.index', $request->only([
+            'group_id',
+            'academic_year',
+            'semester_type',
+            'cycle_week',
+        ]))->with('status', 'Занятието е преместено във временния пул за ръчно преразпределяне.');
+    }
+
     public function storeManualEntry(Request $request, ScheduleService $scheduleService): RedirectResponse
     {
         $data = $request->validate([
@@ -237,7 +331,7 @@ class ScheduleController extends Controller
             'weekday_no' => ['required', 'integer', 'between:1,7'],
             'start_time' => ['required', 'date_format:H:i'],
             'end_time' => ['required', 'date_format:H:i', 'after:start_time'],
-            'duration_hours' => ['required', 'integer', 'between:1,16'],
+            'duration_hours' => ['nullable', 'integer', 'between:1,16'],
             'subject_id' => ['nullable', 'integer', 'exists:subjects,id'],
             'custom_subject_name' => ['required_without:subject_id', 'nullable', 'string', 'max:255'],
             'teacher_id' => ['nullable', 'integer', 'exists:teachers,id'],
@@ -252,6 +346,7 @@ class ScheduleController extends Controller
         $data['room_id'] = isset($data['room_id']) ? (int) $data['room_id'] : null;
         $data['start_time'] .= ':00';
         $data['end_time'] .= ':00';
+        $data['duration_hours'] = $scheduleService->teachingHours($data['start_time'], $data['end_time']);
         if (isset($data['student_flow_id'])) {
             $flow = StudentFlow::query()->with('groups')->findOrFail($data['student_flow_id']);
             if (
@@ -302,24 +397,14 @@ class ScheduleController extends Controller
 
     public function destroy(Request $request, TimetableEntry $entry, ScheduleService $scheduleService): RedirectResponse
     {
-        if ($entry->locked) {
-            throw ValidationException::withMessages([
-                'schedule' => 'Отключете занятието, преди да го премахнете.',
-            ]);
-        }
-
-        $group = $entry->group;
-        $academicYear = $entry->academic_year;
-        $semesterType = $entry->semester_type;
-        $entry->delete();
-        $scheduleService->recordRevision($group, $academicYear, $semesterType, 'Ръчно премахване');
+        $scheduleService->parkEntry($entry, 'Ръчно премахване');
 
         return redirect()->route('schedules.index', $request->only([
             'group_id',
             'academic_year',
             'semester_type',
             'cycle_week',
-        ]))->with('status', 'Занятието е премахнато.');
+        ]))->with('status', 'Занятието е преместено във временния пул и може да бъде върнато в разписанието.');
     }
 
     public function exportPdf(Request $request, StudentGroup $group): Response

@@ -12,6 +12,7 @@ class CurriculumVersion extends Model
         'specialty_id',
         'name',
         'version_year',
+        'current_semester',
         'active_from',
         'active_to',
         'is_active',

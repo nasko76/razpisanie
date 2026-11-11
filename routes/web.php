@@ -32,10 +32,12 @@ Route::middleware(['auth', 'role:admin'])->group(function () {
     Route::post('/admin/catalog/curriculum-versions', [CatalogController::class, 'storeCurriculumVersion'])->name('catalog.curriculum-versions.store');
     Route::patch('/admin/catalog/curriculum-versions/{curriculumVersion}', [CatalogController::class, 'updateCurriculumVersion'])->name('catalog.curriculum-versions.update');
     Route::patch('/admin/catalog/curriculum-versions/{curriculumVersion}/details', [CatalogController::class, 'updateCurriculumVersionDetails'])->name('catalog.curriculum-versions.details.update');
+    Route::post('/admin/catalog/curriculum-versions/{curriculumVersion}/advance-semester', [CatalogController::class, 'advanceCurriculumSemester'])->name('catalog.curriculum-versions.advance-semester');
     Route::delete('/admin/catalog/curriculum-versions/{curriculumVersion}', [CatalogController::class, 'destroyCurriculumVersion'])->name('catalog.curriculum-versions.destroy');
     Route::post('/admin/catalog/curriculum-versions/{curriculumVersion}/duplicate', [CatalogController::class, 'duplicateCurriculumVersion'])->name('catalog.curriculum-versions.duplicate');
     Route::post('/admin/catalog/curriculum-versions/{curriculumVersion}/subjects', [CatalogController::class, 'storeCurriculumSubject'])->name('catalog.curriculum-subjects.store');
     Route::patch('/admin/catalog/curriculum-subjects/{curriculumSubject}', [CatalogController::class, 'updateCurriculumSubject'])->name('catalog.curriculum-subjects.update');
+    Route::patch('/admin/catalog/curriculum-subjects/{curriculumSubject}/selection', [CatalogController::class, 'updateCurriculumSubjectSelection'])->name('catalog.curriculum-subjects.selection.update');
     Route::delete('/admin/catalog/curriculum-subjects/{curriculumSubject}', [CatalogController::class, 'destroyCurriculumSubject'])->name('catalog.curriculum-subjects.destroy');
     Route::post('/admin/catalog/groups', [CatalogController::class, 'storeGroup'])->name('catalog.groups.store');
     Route::patch('/admin/catalog/groups/{group}', [CatalogController::class, 'updateGroup'])->name('catalog.groups.update');
@@ -59,11 +61,14 @@ Route::middleware(['auth', 'role:admin'])->group(function () {
 
     Route::get('/schedules', [ScheduleController::class, 'index'])->name('schedules.index');
     Route::post('/schedules/generate', [ScheduleController::class, 'generate'])->name('schedules.generate');
+    Route::post('/schedules/refresh', [ScheduleController::class, 'refresh'])->name('schedules.refresh');
+    Route::post('/schedules/copy-previous-winter', [ScheduleController::class, 'copyPreviousWinter'])->name('schedules.copy-previous-winter');
     Route::post('/schedules/test', [ScheduleController::class, 'test'])->name('schedules.test');
     Route::post('/schedules/entries', [ScheduleController::class, 'storeManualEntry'])->name('schedules.entries.store');
     Route::put('/schedules/note', [ScheduleController::class, 'updateNote'])->name('schedules.note.update');
     Route::get('/schedules/{group}/history', [ScheduleController::class, 'history'])->name('schedules.history');
     Route::patch('/schedules/{entry}', [ScheduleController::class, 'update'])->name('schedules.update');
+    Route::patch('/schedules/{entry}/pool', [ScheduleController::class, 'park'])->name('schedules.park');
     Route::delete('/schedules/{entry}', [ScheduleController::class, 'destroy'])->name('schedules.destroy');
     Route::get('/schedules/{group}/export/pdf', [ScheduleController::class, 'exportPdf'])->name('schedules.export-pdf');
     Route::get('/schedules/{group}/export/csv', [ScheduleController::class, 'exportCsv'])->name('schedules.export-csv');

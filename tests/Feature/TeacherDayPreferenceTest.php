@@ -3,10 +3,13 @@
 use App\Models\CurriculumSubject;
 use App\Models\CurriculumVersion;
 use App\Models\Specialty;
+use App\Models\StudentFlow;
+use App\Models\StudentGroup;
 use App\Models\Subject;
 use App\Models\Teacher;
 use App\Models\TeacherAssignment;
 use App\Models\TeacherDayPreference;
+use App\Models\TimetableEntry;
 use App\Models\User;
 use Spatie\Permission\Models\Role;
 
@@ -68,6 +71,93 @@ it('updates day preferences separately for each cycle week', function () {
         ->assertSee('Седмица 3')
         ->assertSee('Отсъствия по дати · допълнителни настройки')
         ->assertDontSee('<details open', false);
+});
+
+it('warns when a preference change affects scheduled classes and shows teacher schedule hours', function () {
+    $user = User::factory()->create();
+    $user->assignRole(Role::findOrCreate('admin'));
+    $this->actingAs($user);
+    $teacher = Teacher::query()->create([
+        'first_name' => 'Мария',
+        'last_name' => 'Петрова',
+        'max_daily_hours' => 8,
+        'weekly_workload_hours' => 20,
+        'active' => true,
+    ]);
+    $specialty = Specialty::query()->create(['name' => 'Илюстрация']);
+    $curriculumVersion = CurriculumVersion::query()->create([
+        'specialty_id' => $specialty->id,
+        'name' => 'План 2026',
+        'version_year' => 2026,
+        'is_active' => true,
+    ]);
+    $subject = Subject::query()->create([
+        'name' => 'Рисуване',
+        'auditorium_hours' => 20,
+    ]);
+    CurriculumSubject::query()->create([
+        'curriculum_version_id' => $curriculumVersion->id,
+        'subject_id' => $subject->id,
+        'semester_no' => 1,
+        'course_year' => 1,
+    ]);
+    $group = StudentGroup::query()->create([
+        'specialty_id' => $specialty->id,
+        'curriculum_version_id' => $curriculumVersion->id,
+        'course_year' => 1,
+        'group_name' => 'А',
+        'student_count' => 20,
+    ]);
+    $secondGroup = StudentGroup::query()->create([
+        'specialty_id' => $specialty->id,
+        'curriculum_version_id' => $curriculumVersion->id,
+        'course_year' => 1,
+        'group_name' => 'Б',
+        'student_count' => 18,
+    ]);
+    $flow = StudentFlow::query()->create(['name' => 'Общи лекции', 'subject_id' => $subject->id]);
+    $flow->groups()->sync([$group->id, $secondGroup->id]);
+    $entry = TimetableEntry::query()->create([
+        'group_id' => $group->id,
+        'subject_id' => $subject->id,
+        'student_flow_id' => $flow->id,
+        'teacher_id' => $teacher->id,
+        'coverage_type' => 'lecture',
+        'academic_year' => '2026/2027',
+        'semester_type' => 'winter',
+        'cycle_week' => 1,
+        'weekday_no' => 1,
+        'start_time' => '08:00:00',
+        'end_time' => '11:45:00',
+        'duration_hours' => 4,
+        'auditorium_hours' => 3,
+        'self_study_hours' => 1,
+        'locked' => false,
+    ]);
+
+    $preferences = [];
+    foreach ([1, 2, 3] as $cycleWeek) {
+        foreach (range(1, 7) as $weekday) {
+            $preferences[$cycleWeek][$weekday] = 'neutral';
+        }
+    }
+    $preferences[1][1] = 'unavailable';
+
+    $this->put(route('catalog.teachers.preferred-days', $teacher), ['preferences' => $preferences])
+        ->assertRedirect(route('catalog.teachers.show', $teacher))
+        ->assertSessionHas('warning', fn (string $warning): bool => str_contains($warning, '1 вече поставени занятия')
+            && str_contains($warning, 'Рисуване')
+            && str_contains($warning, 'не са преместени автоматично'));
+
+    $this->assertDatabaseHas('timetable_entries', ['id' => $entry->id, 'teacher_id' => $teacher->id]);
+    $this->get(route('catalog.teachers.show', $teacher))
+        ->assertOk()
+        ->assertSee('Поставени часове по разписания')
+        ->assertSee('20 часа общо за 15-седмичен семестър')
+        ->assertSee('АЗ 15 ч. · самоподготовка 5 ч.')
+        ->assertSee('1 курс · семестър 1 · Илюстрация · група А')
+        ->assertSee('1 курс · семестър 1 · Илюстрация · група Б')
+        ->assertSee('АЗ 3 ч. · Самоподготовка 1 ч.');
 });
 
 it('shows curriculum coverage in both the plan overview and teacher dossier', function () {
