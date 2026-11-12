@@ -39,6 +39,11 @@
         .status { margin:12px 0; padding:10px 12px; border-radius:9px; background:#edf8f0; color:#20583c; }
         .row-actions { display:grid; grid-template-columns:1fr 1fr auto; gap:7px; min-width:250px; }
         .row-actions input,.row-actions select { min-width:80px; }
+        .subject-filter { padding:14px 19px; border-bottom:1px solid var(--line); background:#fbfcfb; }
+        .subject-filter input { max-width:480px; }
+        .subject-edit summary { width:max-content; }
+        .subject-edit[open] { min-width:300px; }
+        .subject-edit[open] .row-actions { margin-top:10px; }
         @media(max-width:850px) { .forms { grid-template-columns:repeat(2,minmax(0,1fr)); } }
         @media(max-width:700px) { .heading { align-items:start; flex-direction:column; } .row-actions { grid-template-columns:1fr; min-width:140px; } }
     </style>
@@ -106,9 +111,14 @@
             <label>Семестър<input name="semester_no" type="number" min="1" max="12" value="1" required></label>
             <button class="button span" type="submit">Добави към плана</button>
         </form>
+        <div class="subject-filter">
+            <label for="curriculum-subject-filter">Търсене на дисциплина</label>
+            <input id="curriculum-subject-filter" type="search" placeholder="Въведете поне 3 букви от името или кода">
+            <span class="muted" id="curriculum-subject-filter-hint" aria-live="polite">Показани са всички дисциплини.</span>
+        </div>
         <div class="table-wrap">
             <table>
-                <thead><tr><th>Курс / семестър</th><th>Дисциплина</th><th>Категория</th><th>Включена</th><th>Аудиторна заетост</th><th>Самоподготовка</th><th>Общо часове</th><th>Форма на контрол</th><th>Преподавателска обезпеченост</th><th>Редакция</th></tr></thead>
+                <thead><tr><th>Курс / семестър</th><th>Дисциплина</th><th>Категория</th><th>Включена</th><th>Аудиторна заетост</th><th>Добавена самоподготовка</th><th>Общо часове</th><th>Форма на контрол</th><th>Преподавателска обезпеченост</th><th>Редакция</th></tr></thead>
                 <tbody>
                 @forelse($curriculumSubjects as $curriculumSubject)
                     @php
@@ -138,21 +148,17 @@
                         $selfStudyHours = $hourValues['self_study_hours'];
                         $categoryLabels = ['mandatory' => 'Задължителна', 'elective' => 'Избираема дисциплина', 'optional' => 'Факултативна дисциплина'];
                     @endphp
-                    <tr>
+                    <tr class="curriculum-subject-row" data-subject-search="{{ mb_strtolower($curriculumSubject->subject?->name.' '.$curriculumSubject->subject?->code, 'UTF-8') }}">
                         <td>{{ $curriculumSubject->course_year }} курс<br><span class="muted">{{ $curriculumSubject->semester_no }} семестър</span></td>
                         <td><strong><a href="{{ route('catalog.index', ['tab' => 'subjects', 'subject_id' => $curriculumSubject->subject_id]) }}#subject-{{ $curriculumSubject->subject_id }}">{{ $curriculumSubject->subject?->name }}</a></strong><br><span class="muted">{{ $curriculumSubject->subject?->code }}</span></td>
                         <td>{{ $categoryLabels[$curriculumSubject->subject_category] ?? 'Задължителна' }}</td>
                         <td>
-                            @if($curriculumSubject->subject_category === 'mandatory')
-                                <span class="tag">Винаги включена</span>
-                            @else
-                                <form method="POST" action="{{ route('catalog.curriculum-subjects.selection.update', $curriculumSubject) }}" class="selection-form">
-                                    @csrf @method('PATCH')
-                                    <input type="hidden" name="is_selected" value="{{ $curriculumSubject->is_selected ? '0' : '1' }}">
-                                    <button class="button" type="submit">{{ $curriculumSubject->is_selected ? 'Изключи' : 'Включи' }}</button>
-                                    <span class="muted">{{ $curriculumSubject->is_selected ? 'Участва в генерирането' : 'Не участва в генерирането' }}</span>
-                                </form>
-                            @endif
+                            <form method="POST" action="{{ route('catalog.curriculum-subjects.selection.update', $curriculumSubject) }}" class="selection-form">
+                                @csrf @method('PATCH')
+                                <input type="hidden" name="is_selected" value="{{ $curriculumSubject->is_selected ? '0' : '1' }}">
+                                <button class="button" type="submit">{{ $curriculumSubject->is_selected ? 'Изключи' : 'Включи' }}</button>
+                                <span class="muted">{{ $curriculumSubject->is_selected ? 'Включена в графика' : 'Изключена от графика' }}</span>
+                            </form>
                         </td>
                         <td class="hours">{{ $auditoriumHours }} ч.<br><span class="muted">Л {{ $hourValues['lecture_hours'] }} · У {{ $hourValues['exercise_hours'] }}</span></td>
                         <td>{{ $selfStudyHours }} ч.</td>
@@ -177,24 +183,27 @@
                             @endforelse
                         </td>
                         <td>
-                            <div class="row-actions">
-                                <form method="POST" action="{{ route('catalog.curriculum-subjects.update', $curriculumSubject) }}">
-                                    @csrf @method('PATCH')
-                                    <label>Курс<input name="course_year" type="number" min="1" max="6" value="{{ $curriculumSubject->course_year }}" required></label>
-                                    <label>Семестър<input name="semester_no" type="number" min="1" max="12" value="{{ $curriculumSubject->semester_no }}" required></label>
-                                    <label>Категория<select name="subject_category" required>@foreach(['mandatory' => 'Задължителна', 'elective' => 'Избираема', 'optional' => 'Факултативна'] as $value => $label)<option value="{{ $value }}" @selected($curriculumSubject->subject_category === $value)>{{ $label }}</option>@endforeach</select></label>
-                                    <label>АЗ<input name="auditorium_hours" type="number" min="0" max="1000" value="{{ $hourValues['auditorium_hours'] }}" required></label>
-                                    <label>Лекции<input name="lecture_hours" type="number" min="0" max="1000" value="{{ $hourValues['lecture_hours'] }}" required></label>
-                                    <label>Упражнения<input name="exercise_hours" type="number" min="0" max="1000" value="{{ $hourValues['exercise_hours'] }}" required></label>
-                                    <label>Самоподготовка<input name="self_study_hours" type="number" min="0" max="1000" value="{{ $hourValues['self_study_hours'] }}" required></label>
-                                    <label>Форма на контрол<select name="control_type"><option value="" @selected(!$hourValues['control_type'])>Не е зададена</option><option value="И" @selected($hourValues['control_type'] === 'И')>Изпит (И)</option><option value="ТО" @selected($hourValues['control_type'] === 'ТО')>Текущ контрол (ТО)</option><option value="П" @selected($hourValues['control_type'] === 'П')>Продължаваща дисциплина (П)</option></select></label>
-                                    <button class="button" type="submit">Запази</button>
-                                </form>
-                                <form method="POST" action="{{ route('catalog.curriculum-subjects.destroy', $curriculumSubject) }}" onsubmit="return confirm('Премахване на дисциплината от плана?')">
-                                    @csrf @method('DELETE')
-                                    <button class="button" type="submit">Премахни</button>
-                                </form>
-                            </div>
+                            <details class="subject-edit">
+                                <summary class="button">Редакция</summary>
+                                <div class="row-actions">
+                                    <form method="POST" action="{{ route('catalog.curriculum-subjects.update', $curriculumSubject) }}">
+                                        @csrf @method('PATCH')
+                                        <label>Курс<input name="course_year" type="number" min="1" max="6" value="{{ $curriculumSubject->course_year }}" required></label>
+                                        <label>Семестър<input name="semester_no" type="number" min="1" max="12" value="{{ $curriculumSubject->semester_no }}" required></label>
+                                        <label>Категория<select name="subject_category" required>@foreach(['mandatory' => 'Задължителна', 'elective' => 'Избираема', 'optional' => 'Факултативна'] as $value => $label)<option value="{{ $value }}" @selected($curriculumSubject->subject_category === $value)>{{ $label }}</option>@endforeach</select></label>
+                                        <label>АЗ<input name="auditorium_hours" type="number" min="0" max="1000" value="{{ $hourValues['auditorium_hours'] }}" required></label>
+                                        <label>Лекции<input name="lecture_hours" type="number" min="0" max="1000" value="{{ $hourValues['lecture_hours'] }}" required></label>
+                                        <label>Упражнения<input name="exercise_hours" type="number" min="0" max="1000" value="{{ $hourValues['exercise_hours'] }}" required></label>
+                                        <label>Добавена самоподготовка<input name="self_study_hours" type="number" min="0" max="1000" value="{{ $hourValues['self_study_hours'] }}" required></label>
+                                        <label>Форма на контрол<select name="control_type"><option value="" @selected(!$hourValues['control_type'])>Не е зададена</option><option value="И" @selected($hourValues['control_type'] === 'И')>Изпит (И)</option><option value="ТО" @selected($hourValues['control_type'] === 'ТО')>Текуща оценка (ТО)</option><option value="П" @selected($hourValues['control_type'] === 'П')>Продължаваща дисциплина (П)</option></select></label>
+                                        <button class="button" type="submit">Запази</button>
+                                    </form>
+                                    <form method="POST" action="{{ route('catalog.curriculum-subjects.destroy', $curriculumSubject) }}" onsubmit="return confirm('Премахване на дисциплината от плана?')">
+                                        @csrf @method('DELETE')
+                                        <button class="button" type="submit">Премахни</button>
+                                    </form>
+                                </div>
+                            </details>
                         </td>
                     </tr>
                 @empty
@@ -205,5 +214,30 @@
         </div>
     </section>
 </main>
+<script>
+    const subjectFilter = document.getElementById('curriculum-subject-filter');
+    const subjectFilterHint = document.getElementById('curriculum-subject-filter-hint');
+    const subjectRows = Array.from(document.querySelectorAll('.curriculum-subject-row'));
+    subjectFilter?.addEventListener('input', () => {
+        const query = subjectFilter.value.trim().toLocaleLowerCase('bg');
+        if (query.length < 3) {
+            subjectRows.forEach((row) => row.hidden = false);
+            subjectFilterHint.textContent = query.length === 0
+                ? 'Показани са всички дисциплини.'
+                : 'Въведете поне 3 букви, за да филтрирате дисциплините.';
+            return;
+        }
+
+        let visibleCount = 0;
+        subjectRows.forEach((row) => {
+            const matches = row.dataset.subjectSearch.includes(query);
+            row.hidden = !matches;
+            if (matches) visibleCount++;
+        });
+        subjectFilterHint.textContent = visibleCount > 0
+            ? `Намерени дисциплини: ${visibleCount}.`
+            : 'Няма намерени дисциплини.';
+    });
+</script>
 </body>
 </html>

@@ -295,6 +295,7 @@ class ScheduleController extends Controller
             'start_time' => ['required', 'date_format:H:i'],
             'end_time' => ['required', 'date_format:H:i', 'after:start_time'],
             'duration_hours' => ['nullable', 'integer', 'between:1,16'],
+            'self_study_hours' => ['sometimes', 'numeric', 'between:0,16'],
             'teacher_id' => ['nullable', 'integer', 'exists:teachers,id'],
             'room_id' => ['nullable', 'integer', 'exists:rooms,id'],
             'coverage_type' => ['nullable', 'in:lecture,exercise'],

@@ -438,17 +438,11 @@ class CatalogController extends Controller
         $data = $request->validate([
             'is_selected' => ['required', 'boolean'],
         ]);
-        if ($curriculumSubject->subject_category === 'mandatory') {
-            throw ValidationException::withMessages([
-                'is_selected' => 'Задължителните дисциплини не могат да бъдат изключени от учебния план.',
-            ]);
-        }
-
         $curriculumSubject->update(['is_selected' => (bool) $data['is_selected']]);
 
         return redirect()->route('catalog.curriculum-versions.show', $curriculumSubject->curriculum_version_id)
             ->with('status', $data['is_selected']
-                ? 'Избираемата дисциплина е включена в генерирането на разписанието.'
+                ? 'Дисциплината е включена в генерирането на разписанието.'
                 : 'Дисциплината е изключена от генерирането на разписанието.');
     }
 

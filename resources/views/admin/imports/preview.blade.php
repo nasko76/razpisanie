@@ -85,6 +85,11 @@
                         @endif
                     @else
                         <p>Катедра: {{ $row['department_name'] ?: 'не е разпозната' }} · Студенти в групата: {{ $row['student_count'] }} · Планирани часове за преподавателя: {{ $row['planned_hours'] ?? '—' }} · Общо възложени часове: {{ $row['teacher_total_assigned_hours'] ?? '—' }}</p>
+                        @if($row['flow_role'] === 'leader')
+                            <p>Редът започва общ поток за тази дисциплина; следващите редове „в поток“ ще бъдат добавени като участващи групи.</p>
+                        @elseif($row['flow_role'] === 'member')
+                            <p>Групата е отбелязана като участник „в поток“.</p>
+                        @endif
                     @endif
 
                     @if($row['warnings'])

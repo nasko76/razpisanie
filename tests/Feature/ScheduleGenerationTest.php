@@ -201,7 +201,8 @@ it('shows one aggregate pool card and updates its remaining hours as blocks are 
         ->and($afterReturn->first()->block_count)->toBe(1)
         ->and($afterReturn->first()->remaining_hours)->toBe(20)
         ->and($afterReturn->first()->auditorium_hours)->toBe(15.0)
-        ->and($afterReturn->first()->self_study_hours)->toBe(5.0);
+        ->and((float) $afterReturn->first()->self_study_hours)->toBe(0.0)
+        ->and((float) $placedEntries->first()->fresh()->self_study_hours)->toBe(0.0);
 });
 
 it('keeps an edited lesson in its selected part of the day when its start time changes', function () {
@@ -903,6 +904,76 @@ it('schedules a common flow lecture only once and exposes it to every member gro
         ->assertOk()
         ->assertSee('Иван Иванов')
         ->assertSee('Общи лекции');
+});
+
+it('allows moving a shared flow into the time freed by shortening a group lesson', function () {
+    $fixtures = createScheduleFixtures();
+    $flow = StudentFlow::query()->create([
+        'name' => 'Общи лекции',
+        'subject_id' => $fixtures['subject']->id,
+    ]);
+    $otherGroup = StudentGroup::query()->create([
+        'specialty_id' => $fixtures['specialty']->id,
+        'curriculum_version_id' => $fixtures['curriculumVersion']->id,
+        'course_year' => 1,
+        'group_name' => 'Б',
+        'student_count' => 20,
+    ]);
+    $flow->groups()->sync([$fixtures['group']->id, $otherGroup->id]);
+
+    $afternoonLesson = TimetableEntry::query()->create([
+        'group_id' => $fixtures['group']->id,
+        'custom_subject_name' => 'Следобедно занятие',
+        'academic_year' => '2026/2027',
+        'semester_type' => 'winter',
+        'cycle_week' => 1,
+        'weekday_no' => 1,
+        'start_time' => '13:00:00',
+        'end_time' => '16:45:00',
+        'duration_hours' => 4,
+        'locked' => false,
+    ]);
+    $flowLesson = TimetableEntry::query()->create([
+        'group_id' => $fixtures['group']->id,
+        'subject_id' => $fixtures['subject']->id,
+        'student_flow_id' => $flow->id,
+        'academic_year' => '2026/2027',
+        'semester_type' => 'winter',
+        'cycle_week' => 1,
+        'weekday_no' => 1,
+        'start_time' => '17:00:00',
+        'end_time' => '20:45:00',
+        'duration_hours' => 4,
+        'coverage_type' => 'lecture',
+        'locked' => false,
+    ]);
+
+    $service = app(ScheduleService::class);
+    $service->moveEntry($afternoonLesson, [
+        'cycle_week' => 1,
+        'weekday_no' => 1,
+        'start_time' => '13:00:00',
+        'end_time' => '15:45:00',
+        'duration_hours' => 3,
+        'teacher_id' => null,
+        'room_id' => null,
+        'locked' => false,
+        'is_in_pool' => false,
+    ]);
+
+    expect(fn () => $service->moveEntry($flowLesson, [
+        'cycle_week' => 1,
+        'weekday_no' => 1,
+        'start_time' => '16:00:00',
+        'end_time' => '19:45:00',
+        'duration_hours' => 4,
+        'teacher_id' => null,
+        'room_id' => null,
+        'locked' => false,
+        'is_in_pool' => false,
+    ]))->not->toThrow(ValidationException::class);
+
+    expect($flowLesson->fresh()->start_time)->toBe('16:00:00');
 });
 
 it('treats a created shared flow as a pool item even without a flow-specific teacher assignment', function () {
@@ -1807,6 +1878,99 @@ it('does not generate unselected elective subjects and starts generating them af
 
     $result = app(ScheduleService::class)->generateForGroup($fixtures['group'], '2026/2027', 'winter');
     expect(collect($result['entries'])->where('subject_id', $elective->id))->toHaveCount(1);
+});
+
+it('allows mandatory plan subjects to be switched off and filters visible plan subjects after three characters', function () {
+    $fixtures = createScheduleFixtures();
+    $admin = createScheduleAdmin();
+    $this->actingAs($admin);
+
+    $this->get(route('catalog.curriculum-versions.show', $fixtures['curriculumVersion']))
+        ->assertOk()
+        ->assertSee('Обобщен учебен план')
+        ->assertSee('Включена в графика')
+        ->assertSee('Добавена самоподготовка')
+        ->assertSee('Въведете поне 3 букви');
+
+    $this->patch(route('catalog.curriculum-subjects.selection.update', $fixtures['curriculumSubject']), [
+        'is_selected' => false,
+    ])->assertRedirect(route('catalog.curriculum-versions.show', $fixtures['curriculumVersion']));
+    expect($fixtures['curriculumSubject']->fresh()->is_selected)->toBeFalse();
+
+    $result = app(ScheduleService::class)->generateForGroup($fixtures['group'], '2026/2027', 'winter');
+    expect(collect($result['entries'])->where('subject_id', $fixtures['subject']->id))->toBeEmpty();
+});
+
+it('allows editing generated self-study in the pool and clears it when the block is returned', function () {
+    $fixtures = createScheduleFixtures();
+    $fixtures['curriculumSubject']->update(['self_study_hours' => 40]);
+    $admin = createScheduleAdmin();
+    $this->actingAs($admin);
+
+    app(ScheduleService::class)->generateForGroup($fixtures['group'], '2026/2027', 'winter');
+    $entry = TimetableEntry::query()->where('is_in_pool', true)->firstOrFail();
+    $this->get(route('schedules.index', [
+        'group_id' => $fixtures['group']->id,
+        'academic_year' => '2026/2027',
+        'semester_type' => 'winter',
+    ]))->assertOk()->assertSee('name="self_study_hours"', false);
+
+    $this->patch(route('schedules.update', $entry), [
+        'group_id' => $fixtures['group']->id,
+        'academic_year' => '2026/2027',
+        'semester_type' => 'winter',
+        'cycle_week' => $entry->cycle_week,
+        'weekday_no' => $entry->weekday_no,
+        'day_part' => $entry->day_part ?? 'morning',
+        'start_time' => substr($entry->start_time, 0, 5),
+        'end_time' => substr($entry->end_time, 0, 5),
+        'duration_hours' => $entry->duration_hours,
+        'teacher_id' => $entry->teacher_id,
+        'room_id' => $entry->room_id,
+        'coverage_type' => $entry->coverage_type,
+        'student_flow_id' => '',
+        'locked' => false,
+        'is_in_pool' => 1,
+        'self_study_hours' => 2.5,
+    ])->assertRedirect()->assertSessionHasNoErrors();
+    expect((float) $entry->fresh()->self_study_hours)->toBe(2.5);
+
+    app(ScheduleService::class)->parkEntry($entry->fresh());
+    expect((float) $entry->fresh()->self_study_hours)->toBe(0.0);
+});
+
+it('resets adjusted automatic self-study when the schedule is generated again', function () {
+    $fixtures = createScheduleFixtures();
+    $fixtures['curriculumSubject']->update(['self_study_hours' => 40]);
+
+    $service = app(ScheduleService::class);
+    $service->generateForGroup($fixtures['group'], '2026/2027', 'winter');
+    $entry = TimetableEntry::query()->where('is_in_pool', true)->firstOrFail();
+    $service->moveEntry($entry, [
+        'cycle_week' => $entry->cycle_week,
+        'weekday_no' => $entry->weekday_no,
+        'start_time' => $entry->start_time,
+        'end_time' => $entry->end_time,
+        'duration_hours' => $entry->duration_hours,
+        'teacher_id' => $entry->teacher_id,
+        'room_id' => $entry->room_id,
+        'locked' => false,
+        'is_in_pool' => true,
+        'self_study_hours' => 2.5,
+    ]);
+
+    $service->generateForGroup($fixtures['group'], '2026/2027', 'winter');
+    $regeneratedEntries = TimetableEntry::query()
+        ->where('group_id', $fixtures['group']->id)
+        ->where('academic_year', '2026/2027')
+        ->where('semester_type', 'winter')
+        ->orderBy('cycle_week')
+        ->orderBy('weekday_no')
+        ->get();
+
+    expect($regeneratedEntries->where('is_in_pool', true))->toHaveCount(5)
+        ->and($regeneratedEntries->pluck('self_study_hours')->map(fn ($hours): float => (float) $hours)->all())->toBe([1.0, 1.0, 2.0, 2.0, 2.0])
+        ->and((float) $regeneratedEntries->sum('self_study_hours') * 5)->toBe(40.0);
 });
 
 it('sorts subjects and filters by curriculum inclusion', function () {

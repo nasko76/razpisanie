@@ -106,9 +106,7 @@ class ScheduleService
                 ->where('curriculum_version_id', $group->curriculum_version_id)
                 ->where('course_year', $group->course_year)
                 ->whereRaw('semester_no % 2 = ?', [$semesterParity])
-                ->where(fn ($query) => $query
-                    ->where('subject_category', 'mandatory')
-                    ->orWhere('is_selected', true))
+                ->where('is_selected', true)
                 ->get();
             $selectedSubjectIds = $curriculumSubjects->pluck('subject_id')->unique();
 
@@ -443,9 +441,7 @@ class ScheduleService
             ->where('curriculum_version_id', $group->curriculum_version_id)
             ->where('course_year', $group->course_year)
             ->whereRaw('semester_no % 2 = ?', [$semesterParity])
-            ->where(fn ($query) => $query
-                ->where('subject_category', 'mandatory')
-                ->orWhere('is_selected', true))
+            ->where('is_selected', true)
             ->orderBy('semester_no')
             ->get();
         $curriculumSubjects = $curriculumSubjects
@@ -820,9 +816,7 @@ class ScheduleService
             ->where('curriculum_version_id', $group->curriculum_version_id)
             ->where('course_year', $group->course_year)
             ->whereRaw('semester_no % 2 = ?', [$semesterParity])
-            ->where(fn ($query) => $query
-                ->where('subject_category', 'mandatory')
-                ->orWhere('is_selected', true))
+            ->where('is_selected', true)
             ->get();
 
         $processedSubjectIds = [];
@@ -961,6 +955,9 @@ class ScheduleService
                     $changes[$optionalField] = $data[$optionalField];
                 }
             }
+            if (array_key_exists('self_study_hours', $data)) {
+                $changes['self_study_hours'] = round((float) $data['self_study_hours'], 2);
+            }
 
             $candidate->fill($changes);
             if (array_key_exists('is_in_pool', $changes) && ! (bool) $candidate->is_in_pool) {
@@ -1072,6 +1069,7 @@ class ScheduleService
                 'is_in_pool' => true,
                 'pool_reason' => 'manual',
                 'locked' => false,
+                'self_study_hours' => 0,
             ]);
             $this->recordRevision($entry->group, $entry->academic_year, $entry->semester_type, $revisionReason);
 
@@ -1333,9 +1331,7 @@ class ScheduleService
                 ->where('curriculum_version_id', $group->curriculum_version_id)
                 ->where('course_year', $group->course_year)
                 ->whereRaw('semester_no % 2 = ?', [$semesterParity])
-                ->where(fn ($query) => $query
-                    ->where('subject_category', 'mandatory')
-                    ->orWhere('is_selected', true))
+                ->where('is_selected', true)
                 ->orderBy('semester_no')
                 ->orderBy('subject_id')
                 ->get();
@@ -1692,9 +1688,7 @@ class ScheduleService
                 ->where('course_year', $flowGroup->course_year)
                 ->where('subject_id', $subject->id)
                 ->whereRaw('semester_no % 2 = ?', [$semesterParity])
-                ->where(fn ($query) => $query
-                    ->where('subject_category', 'mandatory')
-                    ->orWhere('is_selected', true))
+                ->where('is_selected', true)
                 ->first();
 
             if ($curriculumSubject === null) {

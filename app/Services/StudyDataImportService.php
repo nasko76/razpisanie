@@ -5,6 +5,7 @@ namespace App\Services;
 use App\Models\CurriculumSubject;
 use App\Models\CurriculumVersion;
 use App\Models\Specialty;
+use App\Models\StudentFlow;
 use App\Models\StudentGroup;
 use App\Models\Subject;
 use App\Models\Teacher;
@@ -85,6 +86,7 @@ class StudyDataImportService
             $skipped = 0;
             $createdSubjects = [];
             $createdTeachers = [];
+            $activeFlows = [];
 
             foreach ($preview['rows'] as $index => $row) {
                 if ($preview['kind'] === 'curriculum') {
@@ -167,6 +169,28 @@ class StudyDataImportService
                 }
                 $specialty = $this->resolveSpecialty($row['specialty_name']);
                 $group = $this->resolveStudentGroup($specialty, $row);
+                $flowKey = implode('|', [
+                    $subject->id,
+                    $row['course_year'],
+                    $row['semester_no'],
+                    $row['coverage_type'],
+                ]);
+                if ($row['flow_role'] === 'leader') {
+                    $flowName = $subject->name.' - поток';
+                    $flow = StudentFlow::query()
+                        ->where('subject_id', $subject->id)
+                        ->where('name', $flowName)
+                        ->whereHas('groups', fn ($groups) => $groups->whereKey($group->id))
+                        ->first();
+                    $flow ??= StudentFlow::query()->create([
+                        'subject_id' => $subject->id,
+                        'name' => $flowName,
+                    ]);
+                    $flow->groups()->syncWithoutDetaching([$group->id]);
+                    $activeFlows[$flowKey] = $flow;
+                } elseif ($row['flow_role'] === 'member' && isset($activeFlows[$flowKey])) {
+                    $activeFlows[$flowKey]->groups()->syncWithoutDetaching([$group->id]);
+                }
                 $assignment = TeacherAssignment::query()->firstOrNew([
                     'teacher_id' => $teacher->id,
                     'subject_id' => $subject->id,
@@ -419,6 +443,7 @@ class StudyDataImportService
                 $coverageType = $this->normalizeCoverageType($coverageLabel);
                 $plannedHours = $this->planAzNumber($this->cell($cells, $indexes['planned_hours']));
                 $studentCount = $this->planAzNumber($this->cell($cells, $indexes['student_count']));
+                $flowMarker = trim((string) (end($cells)['text'] ?? ''));
                 $source = $this->sourceColumns($headers, $cells);
                 $warnings = [];
 
@@ -472,6 +497,8 @@ class StudyDataImportService
                     'semester_no' => $semesterNo !== null && $semesterNo >= 1 && $semesterNo <= 12 ? $semesterNo : null,
                     'group_name' => $groupName,
                     'student_count' => $studentCount !== null && $studentCount <= 10000 ? $studentCount : 0,
+                    'flow_marker' => $flowMarker,
+                    'flow_role' => $this->planAzFlowRole($flowMarker),
                     'coverage_type' => $coverageType,
                     'coverage_label' => $coverageLabel,
                     'planned_hours' => $plannedHours,
@@ -1158,6 +1185,9 @@ class StudyDataImportService
         $normalized = $this->normalize($value ?? '');
 
         return match (true) {
+            in_array($normalized, ['и', 'и.'], true) => 'И',
+            in_array($normalized, ['то', 'т о', 'то.'], true) => 'ТО',
+            in_array($normalized, ['п', 'п.'], true) => 'П',
             str_contains($normalized, 'изпит') => 'И',
             str_contains($normalized, 'текущ') => 'ТО',
             str_contains($normalized, 'продължаващ') => 'П',
@@ -1373,6 +1403,17 @@ class StudyDataImportService
             in_array($this->normalize($value), ['у', 'упр', 'упражнения', 'упражнение', 'exercise'], true) => 'exercise',
             default => null,
         };
+    }
+
+    private function planAzFlowRole(string $marker): ?string
+    {
+        $normalized = $this->normalize($marker);
+
+        if (preg_match('/(?:^| )в поток(?: |$)/u', $normalized) === 1) {
+            return 'member';
+        }
+
+        return str_contains($normalized, 'поток') ? 'leader' : null;
     }
 
     private function repairMojibake(string $value): string

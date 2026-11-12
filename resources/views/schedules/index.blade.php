@@ -76,7 +76,6 @@
         .schedule-pool-list { min-height:82px; overflow:auto; padding:10px; }
         .schedule-pool-list.over { background:var(--green-soft); }
         .pool-entry { cursor:grab; }
-        .pool-entry .edit-form { display:none; }
         .pool-entry .remaining-hours { color:var(--green); font-weight:750; }
         .pool-count { display:inline-grid; min-width:22px; height:22px; place-items:center; margin-left:5px; border-radius:20px; background:#fce7d7; color:#8d401c; font-size:11px; }
         .notice { margin: 0 0 15px; padding: 12px 15px; border: 1px solid #cfe7d6; border-radius: 10px; background: #edf8f0; color: #20583c; }
@@ -288,6 +287,7 @@
                                                                     <label>Начален час<input type="time" name="start_time" value="{{ substr($entry->start_time, 0, 5) }}" required></label>
                                                                     <label>Краен час<input type="time" name="end_time" value="{{ substr($entry->end_time, 0, 5) }}" required></label>
                                                                     <label>Учебни часове<input class="computed-duration" type="number" name="duration_hours" min="1" max="16" value="{{ $entry->duration_hours }}" readonly required></label>
+                                                                    <label>Самоподготовка за този блок<input type="number" name="self_study_hours" min="0" max="16" step="0.25" value="{{ $entry->self_study_hours }}" required></label>
                                                                     <label>Свободно име<input name="custom_subject_name" value="{{ $entry->custom_subject_name }}" maxlength="255"></label>
                                                                     <label>Бележка<textarea name="note" rows="2" maxlength="2000">{{ $entry->note }}</textarea></label>
                                                                     <label>Вид занятие
@@ -475,7 +475,9 @@
                                 <input type="hidden" name="teacher_id" value="{{ $entry->teacher_id }}">
                                 <input type="hidden" name="room_id" value="{{ $entry->room_id }}">
                                 <input type="hidden" name="locked" value="{{ $entry->locked ? '1' : '0' }}">
-                                <input type="hidden" name="is_in_pool" value="0">
+                                <input type="hidden" name="is_in_pool" value="1">
+                                <label>Самоподготовка за този блок<input type="number" name="self_study_hours" min="0" max="16" step="0.25" value="{{ $entry->self_study_hours }}" required></label>
+                                <button class="button" type="submit">Запази самоподготовката</button>
                             </form>
                         </article>
                     @empty
@@ -548,7 +550,7 @@
                     teacher_id: form.elements.teacher_id.value,
                     room_id: form.elements.room_id.value,
                     locked: form.elements.locked.checked ? '1' : '0',
-                    is_in_pool: form.elements.is_in_pool?.value ?? '0',
+                    is_in_pool: '0',
                 });
                 const response = await fetch(form.action, {
                     method: 'PATCH',

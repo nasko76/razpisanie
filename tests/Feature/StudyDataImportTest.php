@@ -3,6 +3,7 @@
 use App\Models\CurriculumSubject;
 use App\Models\CurriculumVersion;
 use App\Models\Specialty;
+use App\Models\StudentFlow;
 use App\Models\StudentGroup;
 use App\Models\Subject;
 use App\Models\Teacher;
@@ -881,6 +882,121 @@ it('assigns imported PlanAZ teachers to the matching group and lesson type', fun
         ->assertOk()
         ->assertSee('Група 1')
         ->assertSee('Група 2');
+});
+
+it('creates an imported student flow from the anchor row and following in-flow rows', function () {
+    $admin = createStudyImportAdmin();
+    $specialtyOne = Specialty::query()->create(['name' => 'Илюстрация']);
+    $specialtyTwo = Specialty::query()->create(['name' => 'Графичен дизайн']);
+    $versionOne = CurriculumVersion::query()->create([
+        'specialty_id' => $specialtyOne->id,
+        'name' => 'План 2026',
+        'version_year' => 2026,
+        'is_active' => true,
+    ]);
+    $versionTwo = CurriculumVersion::query()->create([
+        'specialty_id' => $specialtyTwo->id,
+        'name' => 'План 2026',
+        'version_year' => 2026,
+        'is_active' => true,
+    ]);
+    $subject = Subject::query()->create(['code' => 'ART-205', 'name' => 'Цветознание']);
+    foreach ([$versionOne, $versionTwo] as $version) {
+        CurriculumSubject::query()->create([
+            'curriculum_version_id' => $version->id,
+            'subject_id' => $subject->id,
+            'semester_no' => 1,
+            'course_year' => 1,
+            'subject_category' => 'mandatory',
+            'is_selected' => true,
+            'auditorium_hours' => 60,
+            'lecture_hours' => 60,
+        ]);
+    }
+    $teacher = Teacher::query()->create([
+        'first_name' => 'Иван',
+        'last_name' => 'Иванов',
+        'max_daily_hours' => 8,
+        'weekly_workload_hours' => 12,
+        'active' => true,
+    ]);
+    $headers = ['Дисциплина', 'Вид', 'Специалност', 'ФО', 'Курс', 'Сем.', 'Гр.', 'Л/У', 'Пл.ч.', 'Брой студенти в поток'];
+    $table = fn (array $row): string => '<table><tr>'.implode('', array_map(fn (string $header): string => '<th>'.$header.'</th>', $headers))
+        .'</tr><tr>'.implode('', array_map(fn (string $cell): string => '<td>'.$cell.'</td>', $row)).'</tr></table>';
+    $html = '<!doctype html><html lang="bg"><meta charset="utf-8"><body>'
+        .'<p><span class="h3">ас.</span> <span class="h3">Иван</span> <span class="h3">Иванов</span> Възложен и редуциран: 60</p>'
+        .$table(['Цветознание', 'Задължителна', 'Илюстрация - ССО', 'РФ', '1', '1', '1', 'Л', '60', 'Поток бр. ст. 38'])
+        .$table(['Цветознание', 'Задължителна', 'Графичен дизайн - ССО', 'РФ', '1', '1', '1', 'Л', '60', 'в поток'])
+        .'</body></html>';
+
+    $response = $this->actingAs($admin)
+        ->post(route('imports.preview'), [
+            'kind' => 'teachers',
+            'employment_category' => 'full_time',
+            'academic_year' => '2026/2027',
+            'file' => UploadedFile::fake()->createWithContent('PlanAZ.html', $html),
+        ])
+        ->assertOk()
+        ->assertSee('започва общ поток', false)
+        ->assertSee('участник „в поток“', false);
+    $preview = $response->viewData('preview');
+    expect($preview['rows'][0]['flow_role'])->toBe('leader')
+        ->and($preview['rows'][1]['flow_role'])->toBe('member');
+
+    $this->post(route('imports.confirm'), [
+        'token' => $response->viewData('token'),
+        'subjects' => [0 => (string) $subject->id, 1 => (string) $subject->id],
+        'teachers' => [0 => (string) $teacher->id, 1 => (string) $teacher->id],
+    ])->assertRedirect(route('catalog.index'));
+
+    $groupOne = StudentGroup::query()->where('specialty_id', $specialtyOne->id)->firstOrFail();
+    $groupTwo = StudentGroup::query()->where('specialty_id', $specialtyTwo->id)->firstOrFail();
+    $flow = StudentFlow::query()->where('subject_id', $subject->id)->firstOrFail();
+    expect($flow->name)->toBe('Цветознание - поток')
+        ->and($flow->groups()->pluck('student_groups.id')->sort()->values()->all())->toBe([$groupOne->id, $groupTwo->id]);
+    $this->assertDatabaseCount('teacher_assignments', 2);
+
+    $service = app(ScheduleService::class);
+    $first = $service->generateForGroup($groupOne, '2026/2027', 'winter');
+    $service->generateForGroup($groupTwo, '2026/2027', 'winter');
+    expect($first['entries'])->toBeEmpty()
+        ->and(TimetableEntry::query()->where('student_flow_id', $flow->id)->where('is_in_pool', true)->count())->toBe(3);
+});
+
+it('imports abbreviated curriculum control values into the summary plan', function () {
+    $admin = createStudyImportAdmin();
+    $version = createStudyImportVersion();
+    $headers = ['Код', 'Дисциплина', 'Курс', 'Семестър', 'АЗ', 'Л', 'У', 'Форма на контрол'];
+    $rows = [
+        ['CTRL-1', 'Изпитен контрол', '1', '1', '30', '30', '0', 'И'],
+        ['CTRL-2', 'Текущ контрол', '1', '1', '30', '0', '30', 'ТО'],
+        ['CTRL-3', 'Продължаващ контрол', '1', '1', '30', '30', '0', 'П'],
+    ];
+    $html = '<!doctype html><html lang="bg"><meta charset="utf-8"><table><tr>'
+        .implode('', array_map(fn (string $header): string => '<th>'.$header.'</th>', $headers)).'</tr>'
+        .implode('', array_map(
+            fn (array $row): string => '<tr>'.implode('', array_map(fn (string $cell): string => '<td>'.$cell.'</td>', $row)).'</tr>',
+            $rows,
+        )).'</table></html>';
+
+    $response = $this->actingAs($admin)
+        ->post(route('imports.preview'), [
+            'kind' => 'curriculum',
+            'curriculum_version_id' => $version->id,
+            'file' => UploadedFile::fake()->createWithContent('plan.html', $html),
+        ])
+        ->assertOk();
+    expect(array_column($response->viewData('preview')['rows'], 'normalized_control_type'))->toBe(['И', 'ТО', 'П']);
+    $this->post(route('imports.confirm'), [
+        'token' => $response->viewData('token'),
+        'subjects' => [0 => 'create', 1 => 'create', 2 => 'create'],
+    ])->assertRedirect(route('catalog.index'));
+
+    $this->get(route('catalog.curriculum-versions.show', $version))
+        ->assertOk()
+        ->assertSee('Изпит (И)')
+        ->assertSee('Текуща оценка (ТО)')
+        ->assertSee('Продължаваща дисциплина (П)');
 });
 
 it('updates matching PlanAZ assignments on reimport without duplicating them', function () {
