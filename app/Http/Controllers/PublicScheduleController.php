@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\AcademicTerm;
 use App\Models\ScheduleNote;
 use App\Models\SoftwareSetting;
 use App\Models\Specialty;
@@ -37,7 +38,25 @@ class PublicScheduleController extends Controller
             'course_year' => ['nullable', 'integer', 'between:1,6'],
             'group_id' => ['nullable', 'integer', 'exists:student_groups,id'],
             'cycle_week' => ['nullable', 'integer', 'between:1,3'],
+            'term' => ['nullable', 'regex:/^\d{4}\/\d{4}\|(winter|summer)$/'],
         ]);
+        $termOptions = AcademicTerm::query()
+            ->whereIn('status', [AcademicTerm::CURRENT, AcademicTerm::ARCHIVED])
+            ->orderByDesc('academic_year')
+            ->orderByRaw("CASE semester_type WHEN 'winter' THEN 0 ELSE 1 END")
+            ->get();
+        $currentTerm = $termOptions->firstWhere('status', AcademicTerm::CURRENT);
+        [$academicYear, $semesterType] = $currentTerm === null
+            ? $this->currentTerm()
+            : [$currentTerm->academic_year, $currentTerm->semester_type];
+        if (isset($filters['term'])) {
+            [$requestedAcademicYear, $requestedSemesterType] = explode('|', $filters['term'], 2);
+            $requestedTerm = $termOptions->first(fn (AcademicTerm $term): bool => $term->academic_year === $requestedAcademicYear
+                && $term->semester_type === $requestedSemesterType);
+            abort_if($requestedTerm === null, 404);
+            $academicYear = $requestedTerm->academic_year;
+            $semesterType = $requestedTerm->semester_type;
+        }
 
         $specialtyId = isset($filters['specialty_id']) ? (int) $filters['specialty_id'] : null;
         $courseYear = isset($filters['course_year']) ? (int) $filters['course_year'] : null;
@@ -52,6 +71,7 @@ class PublicScheduleController extends Controller
 
         $hasSelection = $specialtyId !== null && $courseYear !== null;
         $groupsQuery = StudentGroup::query()
+            ->hideUnnumberedIfSubgroupsExist()
             ->with('specialty')
             ->when($specialtyId !== null, fn ($query) => $query->where('specialty_id', $specialtyId))
             ->when($courseYear !== null, fn ($query) => $query->where('course_year', $courseYear))
@@ -67,20 +87,6 @@ class PublicScheduleController extends Controller
             ? collect([$selectedGroup->id])
             : $groups->pluck('id');
 
-        $activeEntry = $hasSelection && $scheduleGroupIds->isNotEmpty()
-            ? TimetableEntry::query()
-                ->where(function ($query) use ($scheduleGroupIds): void {
-                    $query->whereIn('group_id', $scheduleGroupIds)
-                        ->orWhereHas('studentFlow.groups', fn ($groupsQuery) => $groupsQuery->whereIn('student_groups.id', $scheduleGroupIds));
-                })
-                ->where('is_in_pool', false)
-                ->orderByDesc('academic_year')
-                ->orderByDesc('updated_at')
-                ->first(['academic_year', 'semester_type'])
-            : null;
-        [$academicYear, $semesterType] = $activeEntry === null
-            ? $this->currentTerm()
-            : [$activeEntry->academic_year, $activeEntry->semester_type];
         $cycleWeek = (int) ($filters['cycle_week'] ?? 1);
         $entries = $hasSelection && $scheduleGroupIds->isNotEmpty()
             ? TimetableEntry::query()
@@ -134,6 +140,8 @@ class PublicScheduleController extends Controller
             'selectedCourseYear' => $courseYear,
             'selectedGroup' => $selectedGroup,
             'hasSelection' => $hasSelection,
+            'termOptions' => $termOptions,
+            'selectedTermKey' => $academicYear.'|'.$semesterType,
             'academicYear' => $academicYear,
             'semesterType' => $semesterType,
             'semesterLabel' => $semesterType === 'summer' ? 'Летен семестър' : 'Зимен семестър',
@@ -161,6 +169,11 @@ class PublicScheduleController extends Controller
      */
     private function currentTerm(): array
     {
+        $term = AcademicTerm::query()->where('status', AcademicTerm::CURRENT)->first();
+        if ($term !== null) {
+            return [$term->academic_year, $term->semester_type];
+        }
+
         $year = now()->year;
         $academicYear = now()->month >= 9
             ? $year.'-'.($year + 1)

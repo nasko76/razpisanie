@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Models\CurriculumSubject;
 use App\Models\Room;
+use App\Models\ScheduleNote;
 use App\Models\StudentFlow;
 use App\Models\StudentGroup;
 use App\Models\Subject;
@@ -173,21 +174,6 @@ class ScheduleService
                     ];
                 }
 
-                $selfStudyHours = $hourValues['self_study_hours'];
-                if ($selfStudyHours > 0) {
-                    if ($parts === []) {
-                        $parts[] = [
-                            'coverage_type' => null,
-                            'hours' => $selfStudyHours,
-                            'teacher' => null,
-                            'student_flow_id' => null,
-                        ];
-                    } else {
-                        $largestPart = array_search(max(array_column($parts, 'hours')), array_column($parts, 'hours'), true);
-                        $parts[$largestPart]['hours'] += $selfStudyHours;
-                    }
-                }
-
                 $subjectEntries = [];
                 foreach ($parts as $part) {
                     if ($part['student_flow_id'] !== null) {
@@ -246,7 +232,10 @@ class ScheduleService
                         ->get();
                     foreach ($entries as $entry) {
                         $assignedTeacherId = $part['coverage_type'] === null ? $entry->teacher_id : $part['teacher']?->id;
-                        if ($entry->teacher_id !== $assignedTeacherId) {
+                        $teacherHasChanged = $entry->teacher_id !== null && $assignedTeacherId !== null
+                            ? (int) $entry->teacher_id !== (int) $assignedTeacherId
+                            : $entry->teacher_id !== $assignedTeacherId;
+                        if ($teacherHasChanged) {
                             $entry->teacher_id = $assignedTeacherId;
                             $entry->save();
                             $result['updated']++;
@@ -261,21 +250,42 @@ class ScheduleService
                     $placedEntries = $entries->where('is_in_pool', false)->values();
                     $poolEntries = $entries->where('is_in_pool', true)->values();
                     $lockedPoolEntries = $poolEntries->where('locked', true)->values();
-                    $unlockedPoolEntries = $poolEntries->where('locked', false)->values();
+                    $manualPoolEntries = $poolEntries
+                        ->filter(fn (TimetableEntry $entry): bool => ! $entry->locked && $entry->pool_reason !== 'auto')
+                        ->values();
+                    $automaticPoolEntries = $poolEntries
+                        ->filter(fn (TimetableEntry $entry): bool => ! $entry->locked && $entry->pool_reason === 'auto')
+                        ->values();
                     $targetCycleHours = $part['hours'] / self::COURSE_LENGTH_WEEKS * self::CYCLE_LENGTH_WEEKS;
                     $placedCycleHours = (float) $placedEntries->sum('duration_hours');
                     $lockedPoolHours = (float) $lockedPoolEntries->sum('duration_hours');
-                    $neededPoolCount = (int) ceil(max(0, $targetCycleHours - $placedCycleHours - $lockedPoolHours) / 4);
+                    $remainingManualHours = max(0, $targetCycleHours - $placedCycleHours - $lockedPoolHours);
+                    if ($remainingManualHours < 1) {
+                        foreach ($manualPoolEntries as $manualPoolEntry) {
+                            $manualPoolEntry->delete();
+                            $result['removed']++;
+                        }
+                        $manualPoolEntries = collect();
+                    }
+
+                    $manualPoolHours = (float) $manualPoolEntries->sum('duration_hours');
+                    $remainingAutomaticHours = max(0, $remainingManualHours - $manualPoolHours);
+                    $maximumBlockHours = max(array_column($this->defaultTimeRanges(), 'duration_hours'));
+                    $neededAutomaticCount = (int) ceil(
+                        floor($remainingAutomaticHours + 0.0001) / $maximumBlockHours,
+                    );
+                    $retainedAutomaticEntries = $automaticPoolEntries->take($neededAutomaticCount)->values();
                     $retainedPoolEntries = $lockedPoolEntries
-                        ->concat($unlockedPoolEntries->take($neededPoolCount))
+                        ->concat($manualPoolEntries)
+                        ->concat($retainedAutomaticEntries)
                         ->values();
 
-                    foreach ($unlockedPoolEntries->slice($neededPoolCount) as $excessEntry) {
+                    foreach ($automaticPoolEntries->slice($neededAutomaticCount) as $excessEntry) {
                         $excessEntry->delete();
                         $result['removed']++;
                     }
 
-                    while ($retainedPoolEntries->count() < $neededPoolCount) {
+                    while ($retainedAutomaticEntries->count() < $neededAutomaticCount) {
                         $pendingEntry = $this->generatedEntry($group, $subject, $part, $academicYear, $semesterType);
                         $preferredPeriod = ['morning', 'afternoon', 'evening'][$poolPeriodIndex++ % 3];
                         $range = collect($this->defaultTimeRanges())
@@ -286,19 +296,24 @@ class ScheduleService
                             'weekday_no' => 1,
                             'start_time' => $range['start_time'],
                             'end_time' => $range['end_time'],
-                            'duration_hours' => 4,
+                            'duration_hours' => $maximumBlockHours,
                             'is_in_pool' => true,
                             'pool_reason' => 'auto',
                         ]);
                         $pendingEntry->save();
-                        $retainedPoolEntries->push($pendingEntry);
+                        $retainedAutomaticEntries->push($pendingEntry);
                         $result['added']++;
                     }
 
+                    $this->resizeAutomaticPoolEntries($retainedAutomaticEntries, $remainingAutomaticHours);
+                    $retainedPoolEntries = $lockedPoolEntries
+                        ->concat($manualPoolEntries)
+                        ->concat($retainedAutomaticEntries)
+                        ->values();
                     array_push($subjectEntries, ...$placedEntries->all(), ...$retainedPoolEntries->all());
                 }
 
-                $this->assignWorkloadComponents($subjectEntries, $auditoriumHours);
+                $this->assignWorkloadComponents($subjectEntries, max($auditoriumHours, $plannedHours));
             }
 
             $this->recordRevision($group, $academicYear, $semesterType, 'Презареждане на разписанието');
@@ -313,57 +328,39 @@ class ScheduleService
      */
     public function copyPreviousWinter(StudentGroup $group, string $targetAcademicYear): array
     {
+        return $this->copyPreviousTerm($group, $targetAcademicYear, 'winter');
+    }
+
+    /**
+     * @return array{copied:int, source_academic_year:string}
+     */
+    public function copyPreviousTerm(StudentGroup $group, string $targetAcademicYear, string $semesterType): array
+    {
         $sourceAcademicYear = $this->previousAcademicYear($targetAcademicYear);
 
-        return DB::transaction(function () use ($group, $targetAcademicYear, $sourceAcademicYear): array {
-            $sourceInputs = $this->scheduleInputFingerprints($group, $sourceAcademicYear, 'winter');
-            $targetInputs = $this->scheduleInputFingerprints($group, $targetAcademicYear, 'winter');
-            $sourceSnapshot = DB::table('schedule_input_snapshots')
+        return DB::transaction(function () use ($group, $targetAcademicYear, $sourceAcademicYear, $semesterType): array {
+            $targetEntries = TimetableEntry::query()
                 ->where('group_id', $group->id)
-                ->where('academic_year', $sourceAcademicYear)
-                ->where('semester_type', 'winter')
-                ->first();
-
-            if ($sourceSnapshot === null && ($sourceInputs['has_curriculum'] || $sourceInputs['has_assignments'])) {
-                throw ValidationException::withMessages([
-                    'schedule' => 'Старото разписание няма контролна снимка на плана и възлаганията. Презаредете го преди копиране.',
-                ]);
-            }
-
-            $baselineCurriculum = $sourceSnapshot?->curriculum_fingerprint ?? $sourceInputs['curriculum'];
-            $baselineAssignments = $sourceSnapshot?->assignment_fingerprint ?? $sourceInputs['assignments'];
-            $changedInputs = [];
-
-            if (
-                ! hash_equals($baselineCurriculum, $sourceInputs['curriculum'])
-                || ! hash_equals($baselineCurriculum, $targetInputs['curriculum'])
-            ) {
-                $changedInputs[] = 'учебният план';
-            }
-
-            if (
-                ! hash_equals($baselineAssignments, $sourceInputs['assignments'])
-                || ! hash_equals($baselineAssignments, $targetInputs['assignments'])
-            ) {
-                $changedInputs[] = 'преподавателските възлагания';
-            }
-
-            if ($changedInputs !== []) {
-                throw ValidationException::withMessages([
-                    'schedule' => 'Копирането е спряно, защото са променени '.implode(' и ', $changedInputs).'.',
-                ]);
-            }
-
-            if (TimetableEntry::query()
-                ->where('group_id', $group->id)
-                ->where('academic_year', $targetAcademicYear)
-                ->where('semester_type', 'winter')
                 ->whereNull('student_flow_id')
-                ->exists()) {
+                ->where('academic_year', $targetAcademicYear)
+                ->where('semester_type', $semesterType)
+                ->get();
+            if ($targetEntries->contains(
+                fn (TimetableEntry $entry): bool => ! $entry->is_in_pool || $entry->locked || $entry->pool_reason !== 'auto',
+            )) {
                 throw ValidationException::withMessages([
-                    'schedule' => 'В целевото разписание вече има занятия. Премахнете ги или изберете друга учебна година.',
+                    'schedule' => 'В целевото разписание вече има поставени или ръчно редактирани занятия. Премахнете ги или изберете друга учебна година.',
                 ]);
             }
+            $targetEntries->each(fn (TimetableEntry $entry) => $entry->delete());
+            TimetableEntry::query()
+                ->whereHas('studentFlow.groups', fn ($groupsQuery) => $groupsQuery->whereKey($group->id))
+                ->where('academic_year', $targetAcademicYear)
+                ->where('semester_type', $semesterType)
+                ->where('is_in_pool', true)
+                ->where('pool_reason', 'auto')
+                ->where('locked', false)
+                ->delete();
 
             $sourceEntries = TimetableEntry::query()
                 ->where(function ($query) use ($group): void {
@@ -371,26 +368,65 @@ class ScheduleService
                         ->orWhereHas('studentFlow.groups', fn ($groupsQuery) => $groupsQuery->whereKey($group->id));
                 })
                 ->where('academic_year', $sourceAcademicYear)
-                ->where('semester_type', 'winter')
+                ->where('semester_type', $semesterType)
                 ->orderBy('cycle_week')
                 ->orderBy('weekday_no')
                 ->orderBy('start_time')
                 ->get();
 
-            if ($sourceEntries->isEmpty()) {
-                throw ValidationException::withMessages([
-                    'schedule' => 'В предишния зимен семестър няма занятия за копиране.',
-                ]);
-            }
+            $semesterParity = $semesterType === 'winter' ? 1 : 0;
+            $curriculumSubjects = $group->curriculum_version_id === null
+                ? collect()
+                : CurriculumSubject::query()
+                    ->with('subject')
+                    ->where('curriculum_version_id', $group->curriculum_version_id)
+                    ->where('course_year', $group->course_year)
+                    ->whereRaw('semester_no % 2 = ?', [$semesterParity])
+                    ->where('is_selected', true)
+                    ->get()
+                    ->keyBy('subject_id');
 
             $copied = 0;
             foreach ($sourceEntries as $sourceEntry) {
                 if ($sourceEntry->student_flow_id !== null && TimetableEntry::query()
                     ->where('student_flow_id', $sourceEntry->student_flow_id)
                     ->where('academic_year', $targetAcademicYear)
-                    ->where('semester_type', 'winter')
+                    ->where('semester_type', $semesterType)
                     ->exists()) {
                     continue;
+                }
+
+                $currentPart = null;
+                if ($sourceEntry->subject_id !== null) {
+                    $curriculumSubject = $curriculumSubjects->get($sourceEntry->subject_id);
+                    if ($curriculumSubject?->subject === null) {
+                        continue;
+                    }
+
+                    $hourValues = $curriculumSubject->hourValues();
+                    $currentParts = $this->lessonParts(
+                        $curriculumSubject->subject,
+                        $group,
+                        $semesterType,
+                        $targetAcademicYear,
+                        $hourValues,
+                    );
+                    $plannedHours = array_sum(array_column($currentParts, 'hours'));
+                    if ($plannedHours < $hourValues['auditorium_hours']) {
+                        $currentParts[] = [
+                            'coverage_type' => null,
+                            'hours' => $hourValues['auditorium_hours'] - $plannedHours,
+                            'teacher' => null,
+                            'student_flow_id' => null,
+                        ];
+                    }
+                    $currentPart = collect($currentParts)->first(
+                        fn (array $part): bool => $part['coverage_type'] === $sourceEntry->coverage_type
+                            && $part['student_flow_id'] === $sourceEntry->student_flow_id,
+                    );
+                    if ($currentPart === null) {
+                        continue;
+                    }
                 }
 
                 $entry = $sourceEntry->replicate();
@@ -398,19 +434,38 @@ class ScheduleService
                 if ($entry->student_flow_id === null) {
                     $entry->group_id = $group->id;
                 }
+                if ($currentPart !== null) {
+                    $entry->teacher_id = $currentPart['teacher']?->id;
+                }
 
                 if (! $entry->is_in_pool && ($conflicts = $this->conflicts($entry, true)) !== []) {
-                    throw ValidationException::withMessages([
-                        'schedule' => 'Копирането е спряно заради конфликт: '.implode(' ', $conflicts),
-                    ]);
+                    $entry->is_in_pool = true;
+                    $entry->pool_reason = 'auto';
                 }
 
                 $entry->save();
                 $copied++;
             }
 
-            $this->recordRevision($group, $targetAcademicYear, 'winter', 'Копиране на предишно зимно разписание');
-            $this->saveScheduleInputSnapshot($group, $targetAcademicYear, 'winter');
+            $sourceNote = ScheduleNote::query()
+                ->where('group_id', $group->id)
+                ->where('academic_year', $sourceAcademicYear)
+                ->where('semester_type', $semesterType)
+                ->value('note');
+            if ($sourceNote !== null) {
+                ScheduleNote::query()->firstOrCreate(
+                    [
+                        'group_id' => $group->id,
+                        'academic_year' => $targetAcademicYear,
+                        'semester_type' => $semesterType,
+                    ],
+                    ['note' => $sourceNote],
+                );
+            }
+
+            $this->refreshForGroup($group, $targetAcademicYear, $semesterType);
+            $semesterLabel = $semesterType === 'winter' ? 'зимно' : 'лятно';
+            $this->recordRevision($group, $targetAcademicYear, $semesterType, 'Копиране на предишно '.$semesterLabel.' разписание');
 
             return [
                 'copied' => $copied,
@@ -485,7 +540,7 @@ class ScheduleService
                 $lessonParts = $this->lessonParts($subject, $group, $semesterType, $academicYear, $hourValues);
                 $plannedHours = array_sum(array_column($lessonParts, 'hours'));
 
-                if ($auditoriumHours < 1 && $plannedHours < 1 && $hourValues['self_study_hours'] < 1) {
+                if ($auditoriumHours < 1 && $plannedHours < 1) {
                     $unscheduled[] = [
                         'subject' => $subject->name,
                         'reason' => 'Не са зададени аудиторни часове, лекции или упражнения.',
@@ -502,22 +557,6 @@ class ScheduleService
                         'teacher' => null,
                         'student_flow_id' => null,
                     ];
-                }
-
-                $selfStudyHours = $hourValues['self_study_hours'];
-                if ($selfStudyHours > 0) {
-                    if ($lessonParts === []) {
-                        $lessonParts[] = [
-                            'coverage_type' => null,
-                            'hours' => $selfStudyHours,
-                            'teacher' => null,
-                            'student_flow_id' => null,
-                        ];
-                    } else {
-                        $hoursByPart = array_column($lessonParts, 'hours');
-                        $largestPart = array_search(max($hoursByPart), $hoursByPart, true);
-                        $lessonParts[$largestPart]['hours'] += $selfStudyHours;
-                    }
                 }
 
                 $lockedEntries = TimetableEntry::query()
@@ -607,6 +646,26 @@ class ScheduleService
 
                     while ($scheduledPartHours < $part['hours'] && $session < $maximumSessions) {
                         $candidate = $this->generatedEntry($group, $subject, $part, $academicYear, $semesterType);
+                        $remainingCycleHours = max(
+                            0,
+                            ($part['hours'] - $scheduledPartHours)
+                                * self::CYCLE_LENGTH_WEEKS / self::COURSE_LENGTH_WEEKS,
+                        );
+                        $durationHours = min(
+                            max(array_column($timeRanges, 'duration_hours')),
+                            (int) floor($remainingCycleHours + 0.0001),
+                        );
+                        if ($durationHours < 1) {
+                            $warnings[] = [
+                                'subject' => $subject->name,
+                                'reason' => 'Остават по-малко от един цял учебен час за разпределяне.',
+                                'suggestion' => 'Проверете аудиторните часове в учебния план или добавете занятието ръчно.',
+                            ];
+
+                            break;
+                        }
+
+                        $partTimeRanges = $this->timeRangesForDuration($timeRanges, $durationHours);
                         $pairedEntry = $pairedGroupId === null
                             ? null
                             : $this->pairedEntryFor($candidate, $pairedGroupId, $academicYear, $semesterType, $session);
@@ -624,7 +683,7 @@ class ScheduleService
                             $lastScheduledDay,
                             $pairedEntry,
                             $preferredPeriod,
-                            $timeRanges,
+                            $partTimeRanges,
                         );
                         $subjectCycleWeek ??= $placement['cycle_week'];
                         $candidate->fill($placement);
@@ -670,16 +729,11 @@ class ScheduleService
                 }
                 $this->assignWorkloadComponents($subjectScheduleEntries, max($auditoriumHours, $plannedHours));
 
-                $effectiveSelfStudy = $selfStudyHours + max(
-                    0,
-                    (int) $scheduledHours - max($auditoriumHours, $plannedHours) - $selfStudyHours,
-                );
-
                 $analysis[] = [
                     'subject' => $subject->name,
                     'auditorium_hours' => $auditoriumHours,
                     'scheduled_hours' => (int) $scheduledHours,
-                    'self_study_hours' => $effectiveSelfStudy,
+                    'self_study_hours' => $hourValues['self_study_hours'],
                     'cycle_week' => $subjectCycleWeek,
                     'period' => match (true) {
                         $subjectTimeRange === null => null,
@@ -831,7 +885,7 @@ class ScheduleService
             $hourValues = $curriculumSubject->hourValues();
             $auditoriumHours = $hourValues['auditorium_hours'];
             $plannedHours = $hourValues['lecture_hours'] + $hourValues['exercise_hours'];
-            $requiredHours = max($auditoriumHours, $plannedHours) + $hourValues['self_study_hours'];
+            $requiredHours = max($auditoriumHours, $plannedHours);
             $scheduledHours = $subjectEntries->sum('duration_hours') * self::COURSE_LENGTH_WEEKS / self::CYCLE_LENGTH_WEEKS;
 
             if ($requiredHours > 0 && $subjectEntries->isEmpty()) {
@@ -853,16 +907,12 @@ class ScheduleService
             }
 
             if ($scheduledHours > $requiredHours) {
-                $addedSelfStudyHours = (int) $scheduledHours - $requiredHours;
-                $curriculumSubject->update([
-                    'self_study_hours' => $hourValues['self_study_hours'] + $addedSelfStudyHours,
-                ]);
                 $warnings[] = [
                     'subject' => $subject->name,
-                    'reason' => 'Към самоподготовката на дисциплината са добавени '.$addedSelfStudyHours.' ч.',
-                    'suggestion' => 'Промяната е записана в учебния каталог.',
+                    'reason' => 'Разпределени са '.$scheduledHours.' ч. при '.$requiredHours
+                        .' планирани аудиторни часа ('.($scheduledHours - $requiredHours).' ч. над плана).',
+                    'suggestion' => 'Проверете дали има излишни занятия в разписанието.',
                 ];
-                $requiredHours = (int) $scheduledHours;
             }
 
             if ($scheduledHours < $requiredHours) {
@@ -955,10 +1005,6 @@ class ScheduleService
                     $changes[$optionalField] = $data[$optionalField];
                 }
             }
-            if (array_key_exists('self_study_hours', $data)) {
-                $changes['self_study_hours'] = round((float) $data['self_study_hours'], 2);
-            }
-
             $candidate->fill($changes);
             if (array_key_exists('is_in_pool', $changes) && ! (bool) $candidate->is_in_pool) {
                 $candidate->pool_reason = null;
@@ -1012,6 +1058,10 @@ class ScheduleService
                 }
             }
 
+            if ($entry->subject_id !== null) {
+                $this->reconcileAutomaticPoolBlocks($entry);
+            }
+
             if (
                 $previousTeacherId !== $entry->teacher_id
                 && $previousCoverageType === $entry->coverage_type
@@ -1046,6 +1096,7 @@ class ScheduleService
             $autoPlacement = ['placed' => 0, 'remaining' => 0];
             if ($wasInPool && ! $entry->is_in_pool && $previousPoolReason === 'auto' && $entry->subject_id !== null) {
                 $autoPlacement = $this->placeRemainingAutomaticBlocks($entry);
+                $this->reconcileAutomaticPoolBlocks($entry);
             }
             $this->recordRevision(
                 $entry->group,
@@ -1069,8 +1120,8 @@ class ScheduleService
                 'is_in_pool' => true,
                 'pool_reason' => 'manual',
                 'locked' => false,
-                'self_study_hours' => 0,
             ]);
+            $this->reconcileAutomaticPoolBlocks($entry);
             $this->recordRevision($entry->group, $entry->academic_year, $entry->semester_type, $revisionReason);
 
             return $entry->refresh();
@@ -1078,7 +1129,7 @@ class ScheduleService
     }
 
     /**
-     * Distribute auditorium hours across generated blocks and use remaining block capacity for self-study.
+     * Distribute planned auditorium hours across generated blocks.
      *
      * @param  array<int, TimetableEntry>  $entries
      */
@@ -1097,21 +1148,175 @@ class ScheduleService
         }
 
         $auditoriumPerCycle = min($auditoriumHours / 5, $capacityPerCycle);
-        $baseShare = floor($auditoriumPerCycle / count($entries));
-        $remainingAuditorium = $auditoriumPerCycle - ($baseShare * count($entries));
-        $wholeHourRemainder = abs($remainingAuditorium - round($remainingAuditorium)) < 0.0001;
-        $equalShare = round($auditoriumPerCycle / count($entries), 2);
+        $remainingAuditorium = $auditoriumPerCycle;
+        $remainingCapacity = $capacityPerCycle;
 
         foreach ($entries as $index => $entry) {
-            $share = $wholeHourRemainder
-                ? $baseShare + ($index < (int) round($remainingAuditorium) ? 1 : 0)
-                : $equalShare;
-            $share = min((float) $entry->duration_hours, $share);
+            $capacity = (float) $entry->duration_hours;
+            $share = max(0, $index === array_key_last($entries)
+                ? min($capacity, $remainingAuditorium)
+                : min($capacity, round($remainingAuditorium * $capacity / $remainingCapacity, 2)));
             $entry->update([
                 'auditorium_hours' => round($share, 2),
-                'self_study_hours' => round((float) $entry->duration_hours - $share, 2),
             ]);
+            $remainingAuditorium -= $share;
+            $remainingCapacity -= $capacity;
         }
+    }
+
+    /**
+     * @param  Collection<int, TimetableEntry>  $entries
+     */
+    private function resizeAutomaticPoolEntries(Collection $entries, float $remainingCycleHours): void
+    {
+        $maximumBlockHours = max(array_column($this->defaultTimeRanges(), 'duration_hours'));
+        $remainingWholeHours = (int) floor($remainingCycleHours + 0.0001);
+
+        foreach ($entries as $entry) {
+            if ($remainingWholeHours < 1) {
+                break;
+            }
+
+            $durationHours = min($maximumBlockHours, $remainingWholeHours);
+            $endTime = $this->endTimeForTeachingHours($entry->start_time, $durationHours);
+            if ($endTime === null) {
+                continue;
+            }
+
+            $entry->update([
+                'end_time' => $endTime,
+                'duration_hours' => $durationHours,
+            ]);
+            $remainingWholeHours -= $durationHours;
+        }
+    }
+
+    private function reconcileAutomaticPoolBlocks(TimetableEntry $reference): void
+    {
+        if ($reference->subject_id === null || ! in_array($reference->coverage_type, ['lecture', 'exercise', null], true)) {
+            return;
+        }
+
+        $group = $reference->group;
+        if ($group === null || $group->curriculum_version_id === null) {
+            return;
+        }
+
+        $curriculumSubject = CurriculumSubject::query()
+            ->where('curriculum_version_id', $group->curriculum_version_id)
+            ->where('course_year', $group->course_year)
+            ->where('subject_id', $reference->subject_id)
+            ->whereRaw('semester_no % 2 = ?', [$reference->semester_type === 'winter' ? 1 : 0])
+            ->where('is_selected', true)
+            ->first();
+        if ($curriculumSubject === null) {
+            return;
+        }
+
+        $hourValues = $curriculumSubject->hourValues();
+        $plannedCoverageHours = match ($reference->coverage_type) {
+            'lecture' => $hourValues['lecture_hours'],
+            'exercise' => $hourValues['exercise_hours'],
+            default => max(
+                0,
+                $hourValues['auditorium_hours'] - $hourValues['lecture_hours'] - $hourValues['exercise_hours'],
+            ),
+        };
+        if ($plannedCoverageHours < 1) {
+            return;
+        }
+
+        $relatedEntries = TimetableEntry::query()
+            ->where('subject_id', $reference->subject_id)
+            ->where('academic_year', $reference->academic_year)
+            ->where('semester_type', $reference->semester_type)
+            ->where('coverage_type', $reference->coverage_type)
+            ->when(
+                $reference->student_flow_id !== null,
+                fn (Builder $query) => $query->where('student_flow_id', $reference->student_flow_id),
+                fn (Builder $query) => $query->where('group_id', $reference->group_id)->whereNull('student_flow_id'),
+            )
+            ->orderBy('id')
+            ->get();
+        $scheduledCycleHours = (float) $relatedEntries
+            ->where('is_in_pool', false)
+            ->sum('duration_hours');
+        $manualPoolCycleHours = (float) $relatedEntries
+            ->where('is_in_pool', true)
+            ->filter(fn (TimetableEntry $entry): bool => $entry->pool_reason !== 'auto')
+            ->sum('duration_hours');
+        $remainingCycleHours = max(
+            0,
+            $plannedCoverageHours * self::CYCLE_LENGTH_WEEKS / self::COURSE_LENGTH_WEEKS
+                - $scheduledCycleHours - $manualPoolCycleHours,
+        );
+        $automaticPoolEntries = $relatedEntries
+            ->where('is_in_pool', true)
+            ->where('pool_reason', 'auto')
+            ->values();
+        $poolPrototype = $automaticPoolEntries->first() ?? $reference;
+
+        foreach ($automaticPoolEntries as $poolEntry) {
+            $remainingWholeHours = (int) floor($remainingCycleHours + 0.0001);
+            if ($remainingWholeHours < 1) {
+                $poolEntry->delete();
+
+                continue;
+            }
+
+            $durationHours = min((int) $poolEntry->duration_hours, $remainingWholeHours);
+            $endTime = $this->endTimeForTeachingHours($poolEntry->start_time, $durationHours);
+            if ($endTime === null) {
+                continue;
+            }
+
+            $poolEntry->update([
+                'end_time' => $endTime,
+                'duration_hours' => $durationHours,
+            ]);
+            $remainingCycleHours -= $durationHours;
+        }
+
+        $maximumBlockHours = max(array_column($this->defaultTimeRanges(), 'duration_hours'));
+        while (($remainingWholeHours = (int) floor($remainingCycleHours + 0.0001)) > 0) {
+            $durationHours = min($maximumBlockHours, $remainingWholeHours);
+            $endTime = $this->endTimeForTeachingHours($poolPrototype->start_time, $durationHours);
+            if ($endTime === null) {
+                break;
+            }
+
+            $poolEntry = $poolPrototype->replicate();
+            $poolEntry->fill([
+                'start_time' => $poolPrototype->start_time,
+                'end_time' => $endTime,
+                'duration_hours' => $durationHours,
+                'auditorium_hours' => 0,
+                'is_in_pool' => true,
+                'pool_reason' => 'auto',
+                'locked' => false,
+            ]);
+            $poolEntry->save();
+            $remainingCycleHours -= $durationHours;
+        }
+
+        $subjectEntries = TimetableEntry::query()
+            ->where('subject_id', $reference->subject_id)
+            ->where('academic_year', $reference->academic_year)
+            ->where('semester_type', $reference->semester_type)
+            ->when(
+                $reference->student_flow_id !== null,
+                fn (Builder $query) => $query->where('student_flow_id', $reference->student_flow_id),
+                fn (Builder $query) => $query->where('group_id', $reference->group_id)->whereNull('student_flow_id'),
+            )
+            ->get()
+            ->all();
+        $this->assignWorkloadComponents(
+            $subjectEntries,
+            max(
+                $hourValues['auditorium_hours'],
+                $hourValues['lecture_hours'] + $hourValues['exercise_hours'],
+            ),
+        );
     }
 
     /**
@@ -1121,6 +1326,7 @@ class ScheduleService
     {
         $pendingEntries = TimetableEntry::query()
             ->where('subject_id', $placedEntry->subject_id)
+            ->where('coverage_type', $placedEntry->coverage_type)
             ->where('academic_year', $placedEntry->academic_year)
             ->where('semester_type', $placedEntry->semester_type)
             ->where('is_in_pool', true)
@@ -1205,13 +1411,13 @@ class ScheduleService
             ...$data,
             'day_part' => $data['day_part'] ?? $this->timePeriod($data['start_time']),
             'auditorium_hours' => $data['duration_hours'],
-            'self_study_hours' => 0,
             'locked' => true,
         ]);
 
         $this->assertNoConflicts($entry);
         $entry->save();
         $this->syncTeacherAssignment($entry, null);
+        $this->reconcileAutomaticPoolBlocks($entry);
         $this->recordRevision(
             $entry->group,
             $entry->academic_year,
@@ -1538,16 +1744,6 @@ class ScheduleService
             $parts[] = $baseHours - $plannedHours;
         }
 
-        $selfStudyHours = $hourValues['self_study_hours'];
-        if ($selfStudyHours > 0) {
-            if ($parts === []) {
-                $parts[] = $selfStudyHours;
-            } else {
-                $largestPart = array_search(max($parts), $parts, true);
-                $parts[$largestPart] += $selfStudyHours;
-            }
-        }
-
         return array_sum(array_map(
             fn (int $hours): int => (int) ceil($hours / 20),
             $parts,
@@ -1570,6 +1766,24 @@ class ScheduleService
     }
 
     /**
+     * @param  array<int, array{name:string, start_time:string, end_time:string, duration_hours:int, weekdays:array<int, int>, sort_order:int}>  $timeRanges
+     * @return array<int, array{name:string, start_time:string, end_time:string, duration_hours:int, weekdays:array<int, int>, sort_order:int}>
+     */
+    private function timeRangesForDuration(array $timeRanges, int $durationHours): array
+    {
+        return array_map(function (array $timeRange) use ($durationHours): array {
+            $duration = min($timeRange['duration_hours'], $durationHours);
+
+            return [
+                ...$timeRange,
+                'end_time' => $this->endTimeForTeachingHours($timeRange['start_time'], $duration)
+                    ?? $timeRange['end_time'],
+                'duration_hours' => $duration,
+            ];
+        }, $timeRanges);
+    }
+
+    /**
      * @param  array{coverage_type:string|null, hours:int, teacher:Teacher|null, student_flow_id:int|null}  $part
      * @return array{entries:array<int, TimetableEntry>, added:int, pooled:int, removed:int, updated:int}
      */
@@ -1586,6 +1800,11 @@ class ScheduleService
             ->where('subject_id', $subject->id)
             ->where('academic_year', $academicYear)
             ->where('semester_type', $semesterType)
+            ->when(
+                $part['coverage_type'] === null,
+                fn (Builder $query) => $query->whereNull('coverage_type'),
+                fn (Builder $query) => $query->where('coverage_type', $part['coverage_type']),
+            )
             ->orderByDesc('locked')
             ->orderBy('is_in_pool')
             ->orderBy('cycle_week')
@@ -1595,6 +1814,8 @@ class ScheduleService
             ->get();
         $requiredHours = $this->requiredFlowHours($flow, $subject, $part['coverage_type'], $semesterType, $academicYear);
         $pooled = 0;
+        $removed = 0;
+        $updated = 0;
         if ($requiredHours === 0) {
             foreach ($entries->where('is_in_pool', false)->where('locked', false) as $entry) {
                 $entry->update([
@@ -1606,32 +1827,55 @@ class ScheduleService
                 $pooled++;
             }
         }
-        $averageDuration = max(1, (int) round($entries->avg('duration_hours') ?: 4));
         $placedEntries = $entries->where('is_in_pool', false)->values();
         $poolEntries = $entries->where('is_in_pool', true)->values();
         $lockedPoolEntries = $poolEntries->where('locked', true)->values();
-        $unlockedPoolEntries = $poolEntries->where('locked', false)->values();
+        $manualPoolEntries = $poolEntries
+            ->filter(fn (TimetableEntry $entry): bool => ! $entry->locked && $entry->pool_reason !== 'auto')
+            ->values();
+        $automaticPoolEntries = $poolEntries
+            ->filter(fn (TimetableEntry $entry): bool => ! $entry->locked && $entry->pool_reason === 'auto')
+            ->values();
         $targetCycleHours = $requiredHours / self::COURSE_LENGTH_WEEKS * self::CYCLE_LENGTH_WEEKS;
         $placedCycleHours = (float) $placedEntries->sum('duration_hours');
         $lockedPoolHours = (float) $lockedPoolEntries->sum('duration_hours');
-        $neededPoolCount = (int) ceil(max(0, $targetCycleHours - $placedCycleHours - $lockedPoolHours) / $averageDuration);
+        $remainingManualHours = max(0, $targetCycleHours - $placedCycleHours - $lockedPoolHours);
+        if ($remainingManualHours < 1) {
+            foreach ($manualPoolEntries as $manualPoolEntry) {
+                $manualPoolEntry->delete();
+                $removed++;
+            }
+            $manualPoolEntries = collect();
+        }
+
+        $manualPoolHours = (float) $manualPoolEntries->sum('duration_hours');
+        $remainingAutomaticHours = max(0, $remainingManualHours - $manualPoolHours);
+        $maximumBlockHours = max(array_column($this->defaultTimeRanges(), 'duration_hours'));
+        $neededAutomaticCount = (int) ceil(
+            floor($remainingAutomaticHours + 0.0001) / $maximumBlockHours,
+        );
+        $retainedAutomaticEntries = $automaticPoolEntries->take($neededAutomaticCount)->values();
         $retainedPoolEntries = $lockedPoolEntries
-            ->concat($unlockedPoolEntries->take($neededPoolCount))
+            ->concat($manualPoolEntries)
+            ->concat($retainedAutomaticEntries)
             ->values();
         $retainedEntries = $placedEntries
             ->concat($retainedPoolEntries)
             ->values();
-        $removed = 0;
-        $updated = 0;
 
-        foreach ($unlockedPoolEntries->slice($neededPoolCount) as $excessEntry) {
+        foreach ($automaticPoolEntries->slice($neededAutomaticCount) as $excessEntry) {
             $excessEntry->delete();
             $removed++;
         }
 
         foreach ($retainedEntries as $entry) {
-            $assignedTeacherId = $part['coverage_type'] === null ? $entry->teacher_id : $part['teacher']?->id;
-            if ($entry->teacher_id !== $assignedTeacherId) {
+            $assignedTeacherId = $part['coverage_type'] === null || $part['teacher'] === null
+                ? $entry->teacher_id
+                : $part['teacher']->id;
+            $teacherHasChanged = $entry->teacher_id !== null && $assignedTeacherId !== null
+                ? (int) $entry->teacher_id !== (int) $assignedTeacherId
+                : $entry->teacher_id !== $assignedTeacherId;
+            if ($teacherHasChanged) {
                 $entry->teacher_id = $assignedTeacherId;
                 $entry->save();
                 $updated++;
@@ -1639,7 +1883,7 @@ class ScheduleService
         }
 
         $added = 0;
-        while ($retainedPoolEntries->count() < $lockedPoolEntries->count() + $neededPoolCount) {
+        while ($retainedAutomaticEntries->count() < $neededAutomaticCount) {
             $pendingEntry = $this->generatedEntry($group, $subject, $part, $academicYear, $semesterType);
             $periods = $this->defaultTimeRanges();
             $period = ['morning', 'afternoon', 'evening'][$retainedEntries->count() % 3];
@@ -1652,15 +1896,23 @@ class ScheduleService
                 'weekday_no' => 1,
                 'start_time' => $range['start_time'],
                 'end_time' => $range['end_time'],
-                'duration_hours' => 4,
+                'duration_hours' => $maximumBlockHours,
                 'is_in_pool' => true,
                 'pool_reason' => 'auto',
             ]);
             $pendingEntry->save();
-            $retainedEntries->push($pendingEntry);
-            $retainedPoolEntries->push($pendingEntry);
+            $retainedAutomaticEntries->push($pendingEntry);
             $added++;
         }
+
+        $this->resizeAutomaticPoolEntries($retainedAutomaticEntries, $remainingAutomaticHours);
+        $retainedPoolEntries = $lockedPoolEntries
+            ->concat($manualPoolEntries)
+            ->concat($retainedAutomaticEntries)
+            ->values();
+        $retainedEntries = $placedEntries
+            ->concat($retainedPoolEntries)
+            ->values();
 
         return [
             'entries' => $retainedEntries->all(),
@@ -1705,21 +1957,6 @@ class ScheduleService
                     'teacher' => null,
                     'student_flow_id' => null,
                 ];
-            }
-
-            $selfStudyHours = $hourValues['self_study_hours'];
-            if ($selfStudyHours > 0) {
-                if ($parts === []) {
-                    $parts[] = [
-                        'coverage_type' => null,
-                        'hours' => $selfStudyHours,
-                        'teacher' => null,
-                        'student_flow_id' => null,
-                    ];
-                } else {
-                    $largestPart = array_search(max(array_column($parts, 'hours')), array_column($parts, 'hours'), true);
-                    $parts[$largestPart]['hours'] += $selfStudyHours;
-                }
             }
 
             foreach ($parts as $candidatePart) {
@@ -2093,11 +2330,11 @@ class ScheduleService
             if ($hours > 0) {
                 $assignment = $this->findAssignmentForSubject($subject, $group, $semesterType, $coverageType, $academicYear);
                 $flowId = $coverageType === 'lecture'
-                    ? StudentFlow::query()
+                    ? ($assignment?->student_flow_id ?? StudentFlow::query()
                         ->where('subject_id', $subject->id)
                         ->whereHas('groups', fn ($query) => $query->whereKey($group->id))
                         ->orderBy('id')
-                        ->value('id')
+                        ->value('id'))
                     : null;
 
                 $parts[] = [

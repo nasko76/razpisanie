@@ -25,6 +25,10 @@ Route::middleware(['auth', 'role:admin'])->group(function () {
     Route::get('/admin', [AdminController::class, 'index'])->name('admin.dashboard');
 
     Route::get('/admin/catalog/coverage-report', [CatalogController::class, 'coverageReport'])->name('catalog.coverage-report');
+    Route::post('/admin/catalog/academic-terms/planning', [CatalogController::class, 'createPlanningAcademicTerm'])->name('catalog.academic-terms.plan');
+    Route::post('/admin/catalog/academic-terms/{academicTerm}/current', [CatalogController::class, 'makeAcademicTermCurrent'])->name('catalog.academic-terms.current');
+    Route::post('/admin/catalog/academic-terms/archive-year', [CatalogController::class, 'archiveAcademicYear'])->name('catalog.academic-terms.archive-year');
+    Route::post('/admin/catalog/academic-terms/{academicTerm}/copy-previous', [CatalogController::class, 'copyPreviousPlanningTerm'])->name('catalog.academic-terms.copy-previous');
     Route::get('/admin/settings', [SoftwareSettingsController::class, 'index'])->name('settings.index');
     Route::put('/admin/settings', [SoftwareSettingsController::class, 'update'])->name('settings.update');
     Route::get('/admin/catalog/curriculum-versions/{curriculumVersion}', [CatalogDetailsController::class, 'curriculumVersion'])->name('catalog.curriculum-versions.show');
@@ -69,7 +73,7 @@ Route::middleware(['auth', 'role:admin'])->group(function () {
     Route::get('/schedules', [ScheduleController::class, 'index'])->name('schedules.index');
     Route::post('/schedules/generate', [ScheduleController::class, 'generate'])->name('schedules.generate');
     Route::post('/schedules/refresh', [ScheduleController::class, 'refresh'])->name('schedules.refresh');
-    Route::post('/schedules/copy-previous-winter', [ScheduleController::class, 'copyPreviousWinter'])->name('schedules.copy-previous-winter');
+    Route::post('/schedules/copy-previous-term', [ScheduleController::class, 'copyPreviousTerm'])->name('schedules.copy-previous-term');
     Route::post('/schedules/test', [ScheduleController::class, 'test'])->name('schedules.test');
     Route::post('/schedules/entries', [ScheduleController::class, 'storeManualEntry'])->name('schedules.entries.store');
     Route::put('/schedules/note', [ScheduleController::class, 'updateNote'])->name('schedules.note.update');

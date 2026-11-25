@@ -132,7 +132,6 @@ it('warns when a preference change affects scheduled classes and shows teacher s
         'end_time' => '11:45:00',
         'duration_hours' => 4,
         'auditorium_hours' => 3,
-        'self_study_hours' => 1,
         'locked' => false,
     ]);
 
@@ -154,11 +153,12 @@ it('warns when a preference change affects scheduled classes and shows teacher s
     $this->get(route('catalog.teachers.show', $teacher))
         ->assertOk()
         ->assertSee('Поставени часове по разписания')
-        ->assertSee('20 часа общо за 15-седмичен семестър')
-        ->assertSee('АЗ 15 ч. · самоподготовка 5 ч.')
+        ->assertSee('15 аудиторни часа за 15-седмичен семестър')
+        ->assertSee('Самоподготовката се задава отделно към дисциплината')
         ->assertSee('1 курс · семестър 1 · Илюстрация · група А')
         ->assertSee('1 курс · семестър 1 · Илюстрация · група Б')
-        ->assertSee('АЗ 3 ч. · Самоподготовка 1 ч.');
+        ->assertSee('АЗ 3 ч.')
+        ->assertDontSee('Самоподготовка 1 ч.');
 });
 
 it('does not warn about pool blocks when teacher preferences change', function () {

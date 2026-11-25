@@ -1,5 +1,6 @@
 <?php
 
+use App\Models\AcademicTerm;
 use App\Models\ScheduleNote;
 use App\Models\Specialty;
 use App\Models\StudentGroup;
@@ -15,6 +16,69 @@ it('shows a blank public schedule until a specialty and course are selected', fu
         ->assertSee('name="course_year"', false)
         ->assertDontSee('name="academic_year"', false)
         ->assertDontSee('name="semester_type"', false);
+});
+
+it('shows only the current semester by default and offers archives but not planning semesters publicly', function () {
+    $specialty = Specialty::query()->create([
+        'name' => 'Изобразително изкуство',
+        'code' => 'ИИ',
+        'degree' => 'Бакалавър',
+    ]);
+    $group = StudentGroup::query()->create([
+        'specialty_id' => $specialty->id,
+        'curriculum_version_id' => null,
+        'course_year' => 1,
+        'group_name' => null,
+        'student_count' => 20,
+    ]);
+    AcademicTerm::query()->update(['status' => AcademicTerm::ARCHIVED]);
+    AcademicTerm::query()->updateOrCreate(
+        ['academic_year' => '2025/2026', 'semester_type' => 'winter'],
+        ['status' => AcademicTerm::ARCHIVED],
+    );
+    AcademicTerm::query()->updateOrCreate(
+        ['academic_year' => '2026/2027', 'semester_type' => 'winter'],
+        ['status' => AcademicTerm::CURRENT],
+    );
+    AcademicTerm::query()->updateOrCreate(
+        ['academic_year' => '2026/2027', 'semester_type' => 'summer'],
+        ['status' => AcademicTerm::PLANNING],
+    );
+    foreach ([
+        ['semester_type' => 'winter', 'name' => 'Текущ семестър'],
+        ['semester_type' => 'summer', 'name' => 'Планиран семестър'],
+    ] as $index => $term) {
+        TimetableEntry::query()->create([
+            'group_id' => $group->id,
+            'academic_year' => '2026/2027',
+            'semester_type' => $term['semester_type'],
+            'cycle_week' => 1,
+            'weekday_no' => $index + 1,
+            'start_time' => '09:00:00',
+            'end_time' => '10:30:00',
+            'duration_hours' => 2,
+            'custom_subject_name' => $term['name'],
+        ]);
+    }
+
+    $response = $this->get(route('home', [
+        'specialty_id' => $specialty->id,
+        'course_year' => 1,
+    ]))->assertOk()->assertSee('Текущ семестър')->assertDontSee('Планиран семестър');
+
+    expect($response->viewData('termOptions')->pluck('status')->all())->not->toContain(AcademicTerm::PLANNING);
+
+    $this->get(route('home', [
+        'specialty_id' => $specialty->id,
+        'course_year' => 1,
+        'term' => '2025/2026|winter',
+    ]))->assertOk()->assertSee('2025/2026');
+
+    $this->get(route('home', [
+        'specialty_id' => $specialty->id,
+        'course_year' => 1,
+        'term' => '2026/2027|summer',
+    ]))->assertNotFound();
 });
 
 it('shows the latest available term for the selected specialty and course', function () {

@@ -2,8 +2,10 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\AcademicTerm;
 use App\Models\CurriculumSubject;
 use App\Models\CurriculumVersion;
+use App\Models\Department;
 use App\Models\Room;
 use App\Models\Specialty;
 use App\Models\StudentFlow;
@@ -14,6 +16,7 @@ use App\Models\TeacherAbsence;
 use App\Models\TeacherAssignment;
 use App\Models\TimetableEntry;
 use App\Models\User;
+use App\Services\ScheduleService;
 use Carbon\CarbonImmutable;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
@@ -83,9 +86,16 @@ class CatalogController extends Controller
         }
 
         return view('admin.catalog', [
+            'academicTerms' => AcademicTerm::query()
+                ->orderByDesc('academic_year')
+                ->orderByRaw("CASE semester_type WHEN 'winter' THEN 0 ELSE 1 END")
+                ->get(),
+            'currentAcademicTerm' => AcademicTerm::query()->where('status', AcademicTerm::CURRENT)->first(),
+            'planningAcademicTerm' => AcademicTerm::query()->where('status', AcademicTerm::PLANNING)->first(),
             'specialties' => Specialty::query()->withCount('curriculumVersions')->orderBy('name')->get(),
             'curriculumVersions' => CurriculumVersion::query()->with('specialty')->withCount('subjects')->orderByDesc('version_year')->get(),
             'groups' => StudentGroup::query()
+                ->hideUnnumberedIfSubgroupsExist()
                 ->with(['specialty', 'curriculumVersion.subjects'])
                 ->orderBy(Specialty::query()->select('name')->whereColumn('specialties.id', 'student_groups.specialty_id'))
                 ->orderBy('course_year')
@@ -97,6 +107,7 @@ class CatalogController extends Controller
             'studentFlows' => StudentFlow::query()
                 ->with([
                     'groups' => fn ($query) => $query
+                        ->hideUnnumberedIfSubgroupsExist()
                         ->with('specialty')
                         ->orderBy(Specialty::query()->select('name')->whereColumn('specialties.id', 'student_groups.specialty_id'))
                         ->orderBy('course_year')
@@ -113,15 +124,126 @@ class CatalogController extends Controller
             'subjectPlanId' => $subjectPlanId,
             'teacherPlanId' => $teacherPlanId,
             'teacherDepartmentFilter' => $teacherDepartmentFilter,
-            'teacherDepartments' => Teacher::query()
-                ->whereNotNull('department')
-                ->where('department', '!=', '')
-                ->distinct()
-                ->orderBy('department')
-                ->pluck('department'),
+            'teacherDepartments' => Department::query()->orderBy('name')->pluck('name'),
             'isDepartmentHead' => (bool) $isDepartmentHead,
             'users' => $isDepartmentHead ? collect() : User::query()->orderBy('name')->get(),
         ]);
+    }
+
+    public function createPlanningAcademicTerm(): RedirectResponse
+    {
+        $currentTerm = AcademicTerm::query()->where('status', AcademicTerm::CURRENT)->first();
+        if ($currentTerm === null) {
+            throw ValidationException::withMessages([
+                'academic_term' => 'Първо задайте текущия учебен семестър.',
+            ]);
+        }
+
+        if (AcademicTerm::query()->where('status', AcademicTerm::PLANNING)->exists()) {
+            throw ValidationException::withMessages([
+                'academic_term' => 'Вече има семестър за планиране. Изберете него или го направете текущ.',
+            ]);
+        }
+
+        [$academicYear, $semesterType] = $currentTerm->semester_type === 'winter'
+            ? [$currentTerm->academic_year, 'summer']
+            : $this->nextAcademicYearTerm($currentTerm->academic_year);
+
+        AcademicTerm::query()->updateOrCreate(
+            ['academic_year' => $academicYear, 'semester_type' => $semesterType],
+            ['status' => AcademicTerm::PLANNING],
+        );
+
+        return redirect()->route('catalog.index', ['tab' => 'plans'])
+            ->with('status', 'Създаден е семестърът за планиране: '.($semesterType === 'winter' ? 'Зима ' : 'Лято ').$academicYear.'.');
+    }
+
+    public function makeAcademicTermCurrent(AcademicTerm $academicTerm): RedirectResponse
+    {
+        abort_unless(in_array($academicTerm->status, [AcademicTerm::CURRENT, AcademicTerm::PLANNING], true), 404);
+
+        DB::transaction(function () use ($academicTerm): void {
+            AcademicTerm::query()
+                ->where('status', AcademicTerm::CURRENT)
+                ->update(['status' => AcademicTerm::ARCHIVED]);
+            AcademicTerm::query()
+                ->where('status', AcademicTerm::PLANNING)
+                ->whereKeyNot($academicTerm->id)
+                ->update(['status' => AcademicTerm::ARCHIVED]);
+            $academicTerm->update(['status' => AcademicTerm::CURRENT]);
+        });
+
+        return redirect()->route('catalog.index', ['tab' => 'plans'])
+            ->with('status', 'Текущият семестър е зададен: '.$academicTerm->label().'.');
+    }
+
+    public function archiveAcademicYear(Request $request): RedirectResponse
+    {
+        $data = $request->validate([
+            'academic_year' => ['required', 'regex:/^\d{4}\/\d{4}$/'],
+        ]);
+        $hasActiveTerm = AcademicTerm::query()
+            ->where('academic_year', $data['academic_year'])
+            ->whereIn('status', [AcademicTerm::CURRENT, AcademicTerm::PLANNING])
+            ->exists();
+        if ($hasActiveTerm) {
+            throw ValidationException::withMessages([
+                'academic_year' => 'Текущ или планиран семестър не може да бъде архивиран.',
+            ]);
+        }
+
+        $archived = AcademicTerm::query()
+            ->where('academic_year', $data['academic_year'])
+            ->update(['status' => AcademicTerm::ARCHIVED]);
+
+        return redirect()->route('catalog.index', ['tab' => 'plans'])
+            ->with('status', $archived > 0
+                ? 'Учебната година '.$data['academic_year'].' е архивирана.'
+                : 'За учебната година '.$data['academic_year'].' няма семестри за архивиране.');
+    }
+
+    public function copyPreviousPlanningTerm(AcademicTerm $academicTerm, ScheduleService $scheduleService): RedirectResponse
+    {
+        abort_unless($academicTerm->status === AcademicTerm::PLANNING, 404);
+        $sourceAcademicYear = $this->previousAcademicYear($academicTerm->academic_year);
+        $semesterParity = $academicTerm->semester_type === 'winter' ? 1 : 0;
+        $groupIds = StudentGroup::query()
+            ->where(function ($groups) use ($academicTerm, $semesterParity, $sourceAcademicYear): void {
+                $groups->whereHas('curriculumVersion.subjects', function ($subjects) use ($semesterParity): void {
+                    $subjects->whereColumn('curriculum_subjects.course_year', 'student_groups.course_year')
+                        ->whereRaw('curriculum_subjects.semester_no % 2 = ?', [$semesterParity])
+                        ->where('curriculum_subjects.is_selected', true);
+                })
+                    ->orWhereHas('timetableEntries', fn ($entries) => $entries
+                        ->where('academic_year', $sourceAcademicYear)
+                        ->where('semester_type', $academicTerm->semester_type))
+                    ->orWhereHas('studentFlows.timetableEntries', fn ($entries) => $entries
+                        ->where('academic_year', $sourceAcademicYear)
+                        ->where('semester_type', $academicTerm->semester_type));
+            })
+            ->orderBy('id')
+            ->pluck('id');
+        if ($groupIds->isEmpty()) {
+            throw ValidationException::withMessages([
+                'academic_term' => 'Няма групи с учебен план или разписание за копиране в този семестър.',
+            ]);
+        }
+
+        $copied = DB::transaction(function () use ($groupIds, $academicTerm, $scheduleService): int {
+            $total = 0;
+            foreach ($groupIds as $groupId) {
+                $total += $scheduleService->copyPreviousTerm(
+                    StudentGroup::query()->findOrFail($groupId),
+                    $academicTerm->academic_year,
+                    $academicTerm->semester_type,
+                )['copied'];
+            }
+
+            return $total;
+        });
+
+        return redirect()->route('catalog.index', ['tab' => 'plans'])
+            ->with('status', 'Обновени са графиците на '.$groupIds->count().' групи. Съвпадащите занятия са запазили местата си, променените са сверени с текущите планове и възлагания, а новите занятия са оставени в пула. Копирани са '.$copied.' занятия.');
     }
 
     public function updateDepartmentHead(Request $request): RedirectResponse
@@ -134,12 +256,7 @@ class CatalogController extends Controller
         $user = User::query()->findOrFail($data['user_id']);
 
         if ($data['is_department_head']) {
-            $departments = Teacher::query()
-                ->whereNotNull('department')
-                ->where('department', '!=', '')
-                ->distinct()
-                ->pluck('department')
-                ->all();
+            $departments = Department::query()->orderBy('name')->pluck('name')->all();
             validator($data, [
                 'department' => ['required', Rule::in($departments)],
             ])->validate();
@@ -226,6 +343,7 @@ class CatalogController extends Controller
             'rows' => $rows,
             'curriculumVersions' => CurriculumVersion::query()->with('specialty')->orderByDesc('version_year')->get(),
             'groups' => StudentGroup::query()
+                ->hideUnnumberedIfSubgroupsExist()
                 ->with('specialty')
                 ->orderBy(Specialty::query()->select('name')->whereColumn('specialties.id', 'student_groups.specialty_id'))
                 ->orderBy('course_year')
@@ -577,7 +695,12 @@ class CatalogController extends Controller
         ]);
 
         $data['active'] = true;
-        $teacher = Teacher::query()->create($data);
+        $teacher = DB::transaction(function () use ($data): Teacher {
+            $teacher = Teacher::query()->create($data);
+            $teacher->assignDepartment($data['department'] ?? null);
+
+            return $teacher;
+        });
 
         return redirect()
             ->route('catalog.teachers.show', $teacher)
@@ -590,12 +713,18 @@ class CatalogController extends Controller
             'first_name' => ['required', 'string', 'max:100'],
             'last_name' => ['required', 'string', 'max:100'],
             'title' => ['nullable', 'string', 'max:100'],
+            'department' => ['nullable', 'string', 'max:255'],
             'max_daily_hours' => ['required', 'integer', 'between:1,10'],
             'weekly_workload_hours' => ['required', 'integer', 'between:0,80'],
             'active' => ['required', 'boolean'],
         ]);
 
-        $teacher->update($data);
+        DB::transaction(function () use ($teacher, $data): void {
+            $teacher->update($data);
+            if (array_key_exists('department', $data)) {
+                $teacher->assignDepartment($data['department']);
+            }
+        });
 
         return redirect()
             ->route('catalog.teachers.show', $teacher)
@@ -886,6 +1015,25 @@ class CatalogController extends Controller
     private function saved(string $message, string $tab = 'plans'): RedirectResponse
     {
         return redirect()->route('catalog.index', ['tab' => $tab])->with('status', $message);
+    }
+
+    /**
+     * @return array{string, string}
+     */
+    private function nextAcademicYearTerm(string $academicYear): array
+    {
+        preg_match('/^(\d{4})\/\d{4}$/', $academicYear, $matches);
+        $nextYear = (int) $matches[1] + 1;
+
+        return [$nextYear.'/'.($nextYear + 1), 'winter'];
+    }
+
+    private function previousAcademicYear(string $academicYear): string
+    {
+        preg_match('/^(\d{4})\/\d{4}$/', $academicYear, $matches);
+        $previousYear = (int) $matches[1] - 1;
+
+        return $previousYear.'/'.($previousYear + 1);
     }
 
     /**

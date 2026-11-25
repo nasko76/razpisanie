@@ -2,10 +2,12 @@
 
 namespace App\Models;
 
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Query\Builder as QueryBuilder;
 
 class StudentGroup extends Model
 {
@@ -61,5 +63,26 @@ class StudentGroup extends Model
         }
 
         return $this->course_year.' курс'.($groupName ? ' · група '.$groupName : '');
+    }
+
+    public function scopeHideUnnumberedIfSubgroupsExist(Builder $query): Builder
+    {
+        return $query->where(function (Builder $query): void {
+            $query->whereNotNull('group_name')
+                ->orWhereNotExists(function (QueryBuilder $subgroups): void {
+                    $subgroups->selectRaw('1')
+                        ->from('student_groups as subgroups')
+                        ->whereColumn('subgroups.specialty_id', 'student_groups.specialty_id')
+                        ->whereColumn('subgroups.course_year', 'student_groups.course_year')
+                        ->whereNotNull('subgroups.group_name')
+                        ->where(function (QueryBuilder $versions): void {
+                            $versions->whereColumn('subgroups.curriculum_version_id', 'student_groups.curriculum_version_id')
+                                ->orWhere(function (QueryBuilder $nullVersions): void {
+                                    $nullVersions->whereNull('subgroups.curriculum_version_id')
+                                        ->whereNull('student_groups.curriculum_version_id');
+                                });
+                        });
+                });
+        });
     }
 }

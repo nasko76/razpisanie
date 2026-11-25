@@ -128,6 +128,77 @@
 
         <div class="sections">
             @if($activeTab === 'plans')
+            <section class="card wide">
+                <div class="section-head">
+                    <div>
+                        <h2>Учебна година и семестри</h2>
+                        <p>Текущият семестър се вижда по подразбиране; следващият може да се подготвя предварително.</p>
+                    </div>
+                </div>
+                <div class="list">
+                    <div class="item">
+                        <div class="row-head">
+                            <strong>Текущ семестър</strong>
+                            @if($currentAcademicTerm)
+                                <span class="pill">{{ $currentAcademicTerm->label() }}</span>
+                            @else
+                                <span class="pill off">Не е зададен</span>
+                            @endif
+                        </div>
+                        @if($currentAcademicTerm)
+                            <a class="button" style="margin-top:8px" href="{{ route('schedules.index', ['academic_year' => $currentAcademicTerm->academic_year, 'semester_type' => $currentAcademicTerm->semester_type]) }}">Отвори текущото разписание</a>
+                        @endif
+                    </div>
+                    <div class="item">
+                        <div class="row-head">
+                            <strong>Планиране на следващия семестър</strong>
+                            @if($planningAcademicTerm)
+                                <span class="pill">{{ $planningAcademicTerm->label() }}</span>
+                            @else
+                                <span class="pill off">Няма активен план</span>
+                            @endif
+                        </div>
+                        @if($planningAcademicTerm)
+                            <a class="button primary" style="margin-top:8px" href="{{ route('schedules.index', ['academic_year' => $planningAcademicTerm->academic_year, 'semester_type' => $planningAcademicTerm->semester_type]) }}">Планирай {{ $planningAcademicTerm->semester_type === 'summer' ? 'Лято ' : 'Зима ' }}{{ $planningAcademicTerm->academic_year }}</a>
+                            <form method="POST" action="{{ route('catalog.academic-terms.copy-previous', $planningAcademicTerm) }}" style="display:inline" onsubmit="return confirm('Ще се запазят местата на съвпадащите занятия, ще се приложат текущите преподавателски възлагания, а новите занятия ще бъдат добавени в пула. Продължаване?')">
+                                @csrf
+                                <button class="button" type="submit">Копирай предишното разписание</button>
+                            </form>
+                            <form method="POST" action="{{ route('catalog.academic-terms.current', $planningAcademicTerm) }}" style="display:inline" onsubmit="return confirm('Този семестър ще стане текущ, а предишният ще бъде архивиран. Продължаване?')">
+                                @csrf
+                                <button class="button" type="submit">Направи текущ</button>
+                            </form>
+                        @elseif($currentAcademicTerm)
+                            <form method="POST" action="{{ route('catalog.academic-terms.plan') }}">
+                                @csrf
+                                <button class="button primary" type="submit">Създай следващия семестър за планиране</button>
+                            </form>
+                        @endif
+                    </div>
+                    <div class="item">
+                        <strong>Архивирани и текущи учебни години</strong>
+                        @foreach($academicTerms->groupBy('academic_year') as $year => $yearTerms)
+                            @php
+                                $yearIsActive = $yearTerms->contains(fn ($term) => in_array($term->status, [\App\Models\AcademicTerm::CURRENT, \App\Models\AcademicTerm::PLANNING], true));
+                            @endphp
+                            <div class="row-head" style="margin-top:10px">
+                                <strong>{{ $year }}</strong>
+                                <span class="muted">{{ $yearTerms->map(fn ($term) => $term->label().' · '.match($term->status) { 'current' => 'текущ', 'planning' => 'планиране', default => 'архив' })->join(' · ') }}</span>
+                            </div>
+                            @unless($yearIsActive)
+                                <form method="POST" action="{{ route('catalog.academic-terms.archive-year') }}" style="margin-top:6px" onsubmit="return confirm('Цялата учебна година {{ $year }} ще бъде архивирана. Продължаване?')">
+                                    @csrf
+                                    <input type="hidden" name="academic_year" value="{{ $year }}">
+                                    <button class="button" type="submit">Архивирай учебната година</button>
+                                </form>
+                            @endunless
+                        @endforeach
+                    </div>
+                </div>
+            </section>
+            @endif
+
+            @if($activeTab === 'plans')
             <section class="card">
                 <div class="section-head"><div><h2>Специалности</h2><p>Учебни направления и образователни степени</p></div><span class="pill">{{ $specialties->count() }}</span></div>
                 <form class="forms" method="POST" action="{{ route('catalog.specialties.store') }}">

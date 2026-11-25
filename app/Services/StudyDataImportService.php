@@ -158,8 +158,10 @@ class StudyDataImportService
                 $teacher = $this->resolveTeacher($teacherChoice, $row['teacher_candidates'], $row, $createdTeachers);
                 $teacherUpdates = [];
                 $departmentName = trim((string) ($row['department_name'] ?? ''));
-                if ($departmentName !== '' && $teacher->department !== $departmentName) {
-                    $teacherUpdates['department'] = $departmentName;
+                if ($departmentName !== '') {
+                    if ($teacher->department !== $departmentName || $teacher->departmentRecord?->name !== $departmentName) {
+                        $teacher->assignDepartment($departmentName);
+                    }
                 }
                 if ($preview['employment_category'] === 'honorary') {
                     $teacherUpdates['title'] = $this->honoraryTeacherTitle($teacher->title);
@@ -175,21 +177,33 @@ class StudyDataImportService
                     $row['semester_no'],
                     $row['coverage_type'],
                 ]);
+                $studentFlowId = null;
                 if ($row['flow_role'] === 'leader') {
-                    $flowName = $subject->name.' - поток';
+                    $baseName = mb_substr($subject->name, 0, 230).' - поток';
                     $flow = StudentFlow::query()
                         ->where('subject_id', $subject->id)
-                        ->where('name', $flowName)
                         ->whereHas('groups', fn ($groups) => $groups->whereKey($group->id))
-                        ->first();
-                    $flow ??= StudentFlow::query()->create([
-                        'subject_id' => $subject->id,
-                        'name' => $flowName,
-                    ]);
+                        ->get()
+                        ->first(fn (StudentFlow $existingFlow): bool => $existingFlow->name === $baseName
+                            || preg_match('/^'.preg_quote($baseName, '/').' \(\d+\)$/u', $existingFlow->name) === 1);
+                    if ($flow === null) {
+                        $flowName = $baseName;
+                        $suffix = 2;
+                        while (StudentFlow::query()->where('name', $flowName)->exists()) {
+                            $suffixText = ' ('.$suffix++.')';
+                            $flowName = mb_substr($baseName, 0, 255 - mb_strlen($suffixText)).$suffixText;
+                        }
+                        $flow = StudentFlow::query()->create([
+                            'name' => $flowName,
+                            'subject_id' => $subject->id,
+                        ]);
+                    }
                     $flow->groups()->syncWithoutDetaching([$group->id]);
                     $activeFlows[$flowKey] = $flow;
+                    $studentFlowId = $flow->id;
                 } elseif ($row['flow_role'] === 'member' && isset($activeFlows[$flowKey])) {
                     $activeFlows[$flowKey]->groups()->syncWithoutDetaching([$group->id]);
+                    $studentFlowId = $activeFlows[$flowKey]->id;
                 }
                 $assignment = TeacherAssignment::query()->firstOrNew([
                     'teacher_id' => $teacher->id,
@@ -205,6 +219,7 @@ class StudyDataImportService
                 $wasExisting = $assignment->exists;
                 $assignment->fill([
                     'planned_hours' => $row['planned_hours'],
+                    'student_flow_id' => $studentFlowId,
                     'source_data' => [
                         'columns' => $row['source'],
                         'warnings' => $row['warnings'],
@@ -444,6 +459,7 @@ class StudyDataImportService
                 $plannedHours = $this->planAzNumber($this->cell($cells, $indexes['planned_hours']));
                 $studentCount = $this->planAzNumber($this->cell($cells, $indexes['student_count']));
                 $flowMarker = trim((string) (end($cells)['text'] ?? ''));
+                $flowRole = $this->planAzFlowRole($flowMarker);
                 $source = $this->sourceColumns($headers, $cells);
                 $warnings = [];
 
@@ -463,7 +479,7 @@ class StudyDataImportService
                 if ($coverageType === null) {
                     $warnings[] = 'Колоната „Л/У“ трябва да указва лекции или упражнения.';
                 }
-                if ($plannedHours === null) {
+                if ($plannedHours === null && $flowRole !== 'member') {
                     $warnings[] = 'Не са разпознати планираните часове от колоната „Пл.ч.“.';
                 }
                 if ($studentCount === null && $indexes['student_count'] !== null) {
@@ -498,7 +514,7 @@ class StudyDataImportService
                     'group_name' => $groupName,
                     'student_count' => $studentCount !== null && $studentCount <= 10000 ? $studentCount : 0,
                     'flow_marker' => $flowMarker,
-                    'flow_role' => $this->planAzFlowRole($flowMarker),
+                    'flow_role' => $flowRole,
                     'coverage_type' => $coverageType,
                     'coverage_label' => $coverageLabel,
                     'planned_hours' => $plannedHours,
@@ -517,7 +533,7 @@ class StudyDataImportService
                         && $courseYear !== null && $courseYear >= 1 && $courseYear <= 6
                         && $semesterNo !== null && $semesterNo >= 1 && $semesterNo <= 12
                         && $coverageType !== null
-                        && $plannedHours !== null
+                        && ($plannedHours !== null || $flowRole === 'member')
                         && mb_strlen($subjectName) <= 255
                         && mb_strlen($specialtyName) <= 255
                         && ($context['department_name'] === null || mb_strlen($context['department_name']) <= 255)
@@ -1107,8 +1123,11 @@ class StudyDataImportService
     private function cleanSpecialtyName(string $name): string
     {
         $name = trim($this->repairMojibake(str_replace("\u{00A0}", ' ', $name)));
+        $name = preg_replace('/\s*-\s*ССО\s*$/iu', '', $name) ?? $name;
+        $name = preg_replace('/\s+Вече\s*няма\s+такава\s*$/iu', '', $name) ?? $name;
+        $name = preg_replace('/^Изящни\s+изкуства\s*-\s*/iu', '', $name) ?? $name;
 
-        return trim(preg_replace('/\s*-\s*ССО\s*$/iu', '', $name) ?? $name);
+        return trim($name);
     }
 
     private function cleanGroupName(string $name): ?string
@@ -1140,7 +1159,14 @@ class StudyDataImportService
     {
         Specialty::query()->whereKey($specialty->id)->lockForUpdate()->firstOrFail();
 
-        $curriculumVersion = $specialty->curriculumVersions()
+        $academicStartYear = (int) explode('/', (string) ($row['academic_year'] ?? ''))[0];
+        $targetVersionYear = $academicStartYear > 0
+            ? $academicStartYear - (int) $row['course_year'] + 1
+            : null;
+        $curriculumVersion = $targetVersionYear === null
+            ? null
+            : $specialty->curriculumVersions()->where('version_year', $targetVersionYear)->first();
+        $curriculumVersion ??= $specialty->curriculumVersions()
             ->where('is_active', true)
             ->orderByDesc('version_year')
             ->orderByDesc('id')

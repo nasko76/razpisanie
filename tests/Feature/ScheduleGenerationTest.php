@@ -1,5 +1,6 @@
 <?php
 
+use App\Models\AcademicTerm;
 use App\Models\CurriculumSubject;
 use App\Models\CurriculumVersion;
 use App\Models\Room;
@@ -12,6 +13,7 @@ use App\Models\TeacherAssignment;
 use App\Models\TimetableEntry;
 use App\Models\User;
 use App\Services\ScheduleService;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Validation\ValidationException;
 use Spatie\Permission\Models\Role;
 
@@ -115,6 +117,104 @@ it('generates the selected curriculum semester as a recurring three-week pattern
         ->and(count($result['analysis'][0]['weekdays']))->toBe(3);
 });
 
+it('shortens the final generated block to the remaining curriculum hours', function () {
+    $fixtures = createScheduleFixtures();
+    $fixtures['curriculumSubject']->update([
+        'auditorium_hours' => 30,
+        'lecture_hours' => 30,
+    ]);
+
+    $result = app(ScheduleService::class)->generateForGroup($fixtures['group'], '2026/2027', 'winter');
+    $durations = collect($result['entries'])->pluck('duration_hours')->sort()->values();
+
+    expect($durations->all())->toBe([2, 4])
+        ->and($durations->sum())->toBe(6)
+        ->and(collect($result['entries'])->sum('auditorium_hours') * 5)->toBe(30.0);
+});
+
+it('resizes existing automatic pool blocks when refreshing a curriculum with a partial final block', function () {
+    $fixtures = createScheduleFixtures();
+    $fixtures['curriculumSubject']->update([
+        'auditorium_hours' => 30,
+        'lecture_hours' => 30,
+    ]);
+
+    foreach ([
+        ['start_time' => '08:00:00', 'end_time' => '11:45:00'],
+        ['start_time' => '13:00:00', 'end_time' => '16:45:00'],
+    ] as $range) {
+        TimetableEntry::query()->create([
+            'group_id' => $fixtures['group']->id,
+            'subject_id' => $fixtures['subject']->id,
+            'teacher_id' => $fixtures['teacher']->id,
+            'coverage_type' => 'lecture',
+            'academic_year' => '2026/2027',
+            'semester_type' => 'winter',
+            'cycle_week' => 1,
+            'weekday_no' => 1,
+            ...$range,
+            'duration_hours' => 4,
+            'locked' => false,
+            'is_in_pool' => true,
+            'pool_reason' => 'auto',
+        ]);
+    }
+
+    app(ScheduleService::class)->refreshForGroup($fixtures['group'], '2026/2027', 'winter');
+    $entries = TimetableEntry::query()->where('group_id', $fixtures['group']->id)->orderBy('duration_hours')->get();
+
+    expect($entries->pluck('duration_hours')->all())->toBe([2, 4])
+        ->and($entries->sum('duration_hours'))->toBe(6)
+        ->and($entries->sum('auditorium_hours') * 5)->toBe(30.0);
+});
+
+it('keeps auto-placement within the edited coverage hours and leaves other coverage in the pool', function () {
+    $fixtures = createScheduleFixtures();
+    $fixtures['curriculumSubject']->update([
+        'auditorium_hours' => 90,
+        'lecture_hours' => 60,
+        'exercise_hours' => 30,
+    ]);
+    $service = app(ScheduleService::class);
+    $service->generateForGroup($fixtures['group'], '2026/2027', 'winter');
+    $lectureEntry = TimetableEntry::query()
+        ->where('group_id', $fixtures['group']->id)
+        ->where('coverage_type', 'lecture')
+        ->firstOrFail();
+
+    $service->moveEntry($lectureEntry, [
+        'cycle_week' => 1,
+        'weekday_no' => 1,
+        'day_part' => 'morning',
+        'start_time' => '08:00:00',
+        'end_time' => '12:45:00',
+        'duration_hours' => 5,
+        'teacher_id' => $lectureEntry->teacher_id,
+        'room_id' => $lectureEntry->room_id,
+        'locked' => false,
+        'is_in_pool' => false,
+    ]);
+
+    $lectureEntries = TimetableEntry::query()
+        ->where('group_id', $fixtures['group']->id)
+        ->where('coverage_type', 'lecture')
+        ->orderBy('id')
+        ->get();
+    $exercisePoolEntries = TimetableEntry::query()
+        ->where('group_id', $fixtures['group']->id)
+        ->where('coverage_type', 'exercise')
+        ->where('is_in_pool', true)
+        ->get();
+    $allEntries = TimetableEntry::query()->where('group_id', $fixtures['group']->id)->get();
+
+    expect($lectureEntries)->toHaveCount(3)
+        ->and($lectureEntries->every(fn (TimetableEntry $entry): bool => ! $entry->is_in_pool))->toBeTrue()
+        ->and($lectureEntries->sum('duration_hours'))->toBe(12)
+        ->and($exercisePoolEntries)->toHaveCount(2)
+        ->and($exercisePoolEntries->sum('duration_hours'))->toBe(6)
+        ->and($allEntries->sum('auditorium_hours') * 5)->toBe(90.0);
+});
+
 it('places newly generated individual lessons in the manual pool', function () {
     $fixtures = createScheduleFixtures();
 
@@ -127,7 +227,7 @@ it('places newly generated individual lessons in the manual pool', function () {
         ->and($entries->where('is_in_pool', false))->toBeEmpty();
 });
 
-it('shows one aggregate pool card and updates its remaining hours as blocks are placed and returned', function () {
+it('shows one aggregate pool card using only auditorium hours as blocks are placed and returned', function () {
     $fixtures = createScheduleFixtures();
     $fixtures['teacher']->update(['weekly_workload_hours' => 100]);
     $fixtures['curriculumSubject']->update(['self_study_hours' => 40]);
@@ -139,13 +239,12 @@ it('shows one aggregate pool card and updates its remaining hours as blocks are 
         'group_id' => $fixtures['group']->id,
         'academic_year' => '2026/2027',
         'semester_type' => 'winter',
-    ]))->assertOk()->assertSee('Остават 100 уч. ч. за разпределяне');
+    ]))->assertOk()->assertSee('Остават 60 уч. ч. за разпределяне');
     $poolGroups = $response->viewData('poolEntries');
     expect($poolGroups)->toHaveCount(1)
-        ->and($poolGroups->first()->block_count)->toBe(5)
-        ->and($poolGroups->first()->remaining_hours)->toBe(100)
-        ->and($poolGroups->first()->auditorium_hours)->toBe(60.0)
-        ->and($poolGroups->first()->self_study_hours)->toBe(40.0);
+        ->and($poolGroups->first()->block_count)->toBe(3)
+        ->and($poolGroups->first()->remaining_hours)->toBe(60)
+        ->and($poolGroups->first()->auditorium_hours)->toBe(60.0);
 
     $poolEntry = $poolGroups->first()->entry;
     $this->patch(route('schedules.update', $poolEntry), [
@@ -181,15 +280,15 @@ it('shows one aggregate pool card and updates its remaining hours as blocks are 
         ->orderBy('weekday_no')
         ->get();
     expect($afterPlacement)->toBeEmpty()
-        ->and($placedEntries)->toHaveCount(5)
+        ->and($placedEntries)->toHaveCount(3)
         ->and($placedEntries->first()->weekday_no)->toBe(1)
         ->and($placedEntries->first()->cycle_week)->toBe(1)
-        ->and($placedEntries->pluck('weekday_no')->all())->toBe([1, 2, 3, 4, 5])
+        ->and($placedEntries->pluck('weekday_no')->all())->toBe([1, 2, 3])
         ->and($placedEntries->pluck('cycle_week')->unique()->all())->toBe([1])
         ->and($placedEntries->every(fn (TimetableEntry $block): bool => $block->start_time === '08:00:00' && $block->end_time === '11:45:00' && $block->duration_hours === 4))->toBeTrue()
         ->and($placedEntries->every(fn (TimetableEntry $block): bool => $block->day_part === 'morning'))->toBeTrue()
         ->and($placedEntries->sum('auditorium_hours') * 5)->toBe(60.0)
-        ->and($placedEntries->sum('self_study_hours') * 5)->toBe(40.0);
+        ->and($fixtures['curriculumSubject']->fresh()->self_study_hours)->toBe(40);
 
     app(ScheduleService::class)->parkEntry($placedEntries->first());
     $afterReturn = $this->get(route('schedules.index', [
@@ -200,9 +299,8 @@ it('shows one aggregate pool card and updates its remaining hours as blocks are 
     expect($afterReturn)->toHaveCount(1)
         ->and($afterReturn->first()->block_count)->toBe(1)
         ->and($afterReturn->first()->remaining_hours)->toBe(20)
-        ->and($afterReturn->first()->auditorium_hours)->toBe(15.0)
-        ->and((float) $afterReturn->first()->self_study_hours)->toBe(0.0)
-        ->and((float) $placedEntries->first()->fresh()->self_study_hours)->toBe(0.0);
+        ->and($afterReturn->first()->auditorium_hours)->toBe(20.0)
+        ->and($fixtures['curriculumSubject']->fresh()->self_study_hours)->toBe(40);
 });
 
 it('keeps an edited lesson in its selected part of the day when its start time changes', function () {
@@ -645,6 +743,210 @@ it('advances the current semester and archives a curriculum after semester four'
         ->and($fixtures['curriculumVersion']->fresh()->current_semester)->toBe(4);
 });
 
+it('filters schedule groups by course and shows every subject without extra controls', function () {
+    $fixtures = createScheduleFixtures();
+    $firstGroup = StudentGroup::query()->create([
+        'specialty_id' => $fixtures['specialty']->id,
+        'curriculum_version_id' => $fixtures['curriculumVersion']->id,
+        'course_year' => 2,
+        'group_name' => 'А',
+        'student_count' => 16,
+    ]);
+    $secondGroup = StudentGroup::query()->create([
+        'specialty_id' => $fixtures['specialty']->id,
+        'curriculum_version_id' => $fixtures['curriculumVersion']->id,
+        'course_year' => 2,
+        'group_name' => 'Б',
+        'student_count' => 18,
+    ]);
+    $selectedSubject = Subject::query()->create([
+        'code' => 'RIS-301',
+        'name' => 'История на изкуството',
+    ]);
+    $otherSubject = Subject::query()->create([
+        'code' => 'RIS-302',
+        'name' => 'Композиция III',
+    ]);
+
+    foreach ([$selectedSubject, $otherSubject] as $subject) {
+        CurriculumSubject::query()->create([
+            'curriculum_version_id' => $fixtures['curriculumVersion']->id,
+            'subject_id' => $subject->id,
+            'semester_no' => 3,
+            'course_year' => 2,
+            'auditorium_hours' => 30,
+            'lecture_hours' => 30,
+        ]);
+    }
+
+    $admin = createScheduleAdmin();
+    $filters = [
+        'group_id' => $secondGroup->id,
+        'academic_year' => '2026/2027',
+        'semester_type' => 'winter',
+        'course_year' => 2,
+    ];
+
+    $response = $this->actingAs($admin)
+        ->get(route('schedules.index', $filters))
+        ->assertOk();
+
+    expect($response->viewData('courseYear'))->toBe(2)
+        ->and($response->viewData('semesterNo'))->toBe(3)
+        ->and($response->viewData('semesterType'))->toBe('winter')
+        ->and($response->viewData('selectedGroup')->id)->toBe($secondGroup->id)
+        ->and($response->viewData('groups')->pluck('id')->all())->toBe([$firstGroup->id, $secondGroup->id])
+        ->and($response->viewData('curriculumSubjects')->pluck('subject_id')->sort()->values()->all())->toBe(
+            collect([$selectedSubject->id, $otherSubject->id])->sort()->values()->all(),
+        );
+    $response->assertSee('Изобразително изкуство - група А')
+        ->assertSee('Изобразително изкуство - група Б')
+        ->assertSee('name="course_year"', false)
+        ->assertSee('2-ри курс')
+        ->assertDontSee('id="subject_id"', false)
+        ->assertDontSee('Покажи разписание')
+        ->assertDontSee('select id="academic_year"', false)
+        ->assertDontSee('семестър по учебен план');
+
+    $this->post(route('schedules.test'), [
+        ...$filters,
+    ])->assertRedirect(route('schedules.index', [
+        'group_id' => $secondGroup->id,
+        'academic_year' => '2026/2027',
+        'semester_type' => 'winter',
+        'course_year' => 2,
+    ]));
+});
+
+it('creates the next planning semester and archives the previous current semester when promoted', function () {
+    AcademicTerm::query()->update(['status' => AcademicTerm::ARCHIVED]);
+    $currentTerm = AcademicTerm::query()->updateOrCreate(
+        ['academic_year' => '2026/2027', 'semester_type' => 'winter'],
+        ['status' => AcademicTerm::CURRENT],
+    );
+    $admin = createScheduleAdmin();
+
+    $this->actingAs($admin)
+        ->post(route('catalog.academic-terms.plan'))
+        ->assertRedirect(route('catalog.index', ['tab' => 'plans']));
+
+    $planningTerm = AcademicTerm::query()
+        ->where('academic_year', '2026/2027')
+        ->where('semester_type', 'summer')
+        ->firstOrFail();
+    expect($planningTerm->status)->toBe(AcademicTerm::PLANNING)
+        ->and($currentTerm->fresh()->status)->toBe(AcademicTerm::CURRENT);
+
+    $this->post(route('catalog.academic-terms.current', $planningTerm))
+        ->assertRedirect(route('catalog.index', ['tab' => 'plans']));
+
+    expect($planningTerm->fresh()->status)->toBe(AcademicTerm::CURRENT)
+        ->and($currentTerm->fresh()->status)->toBe(AcademicTerm::ARCHIVED);
+});
+
+it('keeps a planning semester selected when changing the course filter', function () {
+    AcademicTerm::query()->update(['status' => AcademicTerm::ARCHIVED]);
+    AcademicTerm::query()->updateOrCreate(
+        ['academic_year' => '2025/2026', 'semester_type' => 'winter'],
+        ['status' => AcademicTerm::CURRENT],
+    );
+    AcademicTerm::query()->updateOrCreate(
+        ['academic_year' => '2026/2027', 'semester_type' => 'summer'],
+        ['status' => AcademicTerm::PLANNING],
+    );
+    $fixtures = createScheduleFixtures();
+    $secondCourseGroup = StudentGroup::query()->create([
+        'specialty_id' => $fixtures['specialty']->id,
+        'curriculum_version_id' => $fixtures['curriculumVersion']->id,
+        'course_year' => 2,
+        'group_name' => null,
+        'student_count' => 18,
+    ]);
+    $summerSubject = Subject::query()->create([
+        'code' => 'RIS-202',
+        'name' => 'Лятно рисуване',
+    ]);
+    CurriculumSubject::query()->create([
+        'curriculum_version_id' => $fixtures['curriculumVersion']->id,
+        'subject_id' => $summerSubject->id,
+        'semester_no' => 4,
+        'course_year' => 2,
+        'auditorium_hours' => 30,
+        'lecture_hours' => 30,
+    ]);
+    $admin = createScheduleAdmin();
+
+    $planningResponse = $this->actingAs($admin)
+        ->get(route('schedules.index', ['academic_year' => '2026/2027', 'course_year' => 1]))
+        ->assertOk();
+    expect($planningResponse->viewData('semesterType'))->toBe('summer')
+        ->and($planningResponse->viewData('academicYear'))->toBe('2026/2027');
+
+    $planningResponse
+        ->assertSee('name="semester_type" value="summer"', false)
+        ->assertSee('name="academic_year" value="2026/2027"', false);
+
+    $this->get(route('schedules.index', [
+        'academic_year' => '2026/2027',
+        'semester_type' => 'summer',
+        'course_year' => 2,
+    ]))
+        ->assertOk()
+        ->assertViewHas('semesterType', 'summer')
+        ->assertViewHas('semesterNo', 4)
+        ->assertViewHas('courseYear', 2)
+        ->assertViewHas('selectedGroup', fn ($group): bool => $group?->id === $secondCourseGroup->id);
+});
+
+it('prepares current-plan pool blocks when copying a planning term without an old group schedule', function () {
+    AcademicTerm::query()->update(['status' => AcademicTerm::ARCHIVED]);
+    $planningTerm = AcademicTerm::query()->updateOrCreate(
+        ['academic_year' => '2026/2027', 'semester_type' => 'summer'],
+        ['status' => AcademicTerm::PLANNING],
+    );
+    $fixtures = createScheduleFixtures();
+    $fixtures['curriculumSubject']->update(['semester_no' => 2]);
+    $admin = createScheduleAdmin();
+
+    $this->actingAs($admin)
+        ->post(route('catalog.academic-terms.copy-previous', $planningTerm))
+        ->assertRedirect(route('catalog.index', ['tab' => 'plans']));
+
+    $targetEntries = TimetableEntry::query()
+        ->where('group_id', $fixtures['group']->id)
+        ->where('academic_year', '2026/2027')
+        ->where('semester_type', 'summer')
+        ->get();
+
+    expect($targetEntries)->toHaveCount(3)
+        ->and($targetEntries->pluck('subject_id')->unique()->all())->toBe([$fixtures['subject']->id])
+        ->and($targetEntries->every(fn (TimetableEntry $entry): bool => $entry->is_in_pool))->toBeTrue();
+});
+
+it('archives only completed academic years', function () {
+    AcademicTerm::query()->update(['status' => AcademicTerm::ARCHIVED]);
+    $currentTerm = AcademicTerm::query()->updateOrCreate(
+        ['academic_year' => '2026/2027', 'semester_type' => 'winter'],
+        ['status' => AcademicTerm::CURRENT],
+    );
+    $pastTerm = AcademicTerm::query()->updateOrCreate(
+        ['academic_year' => '2025/2026', 'semester_type' => 'winter'],
+        ['status' => AcademicTerm::PLANNING],
+    );
+    $admin = createScheduleAdmin();
+
+    $this->actingAs($admin)
+        ->from(route('catalog.index', ['tab' => 'plans']))
+        ->post(route('catalog.academic-terms.archive-year'), ['academic_year' => '2026/2027'])
+        ->assertSessionHasErrors('academic_year');
+    expect($currentTerm->fresh()->status)->toBe(AcademicTerm::CURRENT);
+
+    $pastTerm->update(['status' => AcademicTerm::ARCHIVED]);
+    $this->post(route('catalog.academic-terms.archive-year'), ['academic_year' => '2025/2026'])
+        ->assertRedirect(route('catalog.index', ['tab' => 'plans']));
+    expect($pastTerm->fresh()->status)->toBe(AcademicTerm::ARCHIVED);
+});
+
 it('copies a previous winter schedule when its effective inputs are unchanged', function () {
     $fixtures = createScheduleFixtures();
     $service = app(ScheduleService::class);
@@ -670,20 +972,55 @@ it('copies a previous winter schedule when its effective inputs are unchanged', 
         ->and(TimetableEntry::query()->where('group_id', $fixtures['group']->id)->where('academic_year', '2026/2027')->where('is_in_pool', false)->count())->toBe(3);
 });
 
-it('refuses to copy a previous winter schedule after its plan changes', function () {
+it('reconciles copied blocks against the current curriculum plan', function () {
     $fixtures = createScheduleFixtures();
     $service = app(ScheduleService::class);
     $service->generateForGroup($fixtures['group'], '2025/2026', 'winter');
-    $fixtures['curriculumSubject']->update(['semester_no' => 3]);
+    $fixtures['curriculumSubject']->update(['is_selected' => false]);
+    $newSubject = Subject::query()->create([
+        'code' => 'RIS-102',
+        'name' => 'Нова дисциплина',
+    ]);
+    CurriculumSubject::query()->create([
+        'curriculum_version_id' => $fixtures['curriculumVersion']->id,
+        'subject_id' => $newSubject->id,
+        'semester_no' => 1,
+        'course_year' => 1,
+        'auditorium_hours' => 30,
+        'lecture_hours' => 30,
+        'is_selected' => true,
+    ]);
 
-    expect(fn () => $service->copyPreviousWinter($fixtures['group'], '2026/2027'))
-        ->toThrow(ValidationException::class, 'учебният план');
+    $result = $service->copyPreviousWinter($fixtures['group'], '2026/2027');
+    $targetEntries = TimetableEntry::query()
+        ->where('group_id', $fixtures['group']->id)
+        ->where('academic_year', '2026/2027')
+        ->get();
+
+    expect($result['copied'])->toBe(0)
+        ->and($targetEntries->pluck('subject_id')->unique()->all())->toBe([$newSubject->id])
+        ->and($targetEntries->every(fn (TimetableEntry $entry): bool => $entry->is_in_pool))->toBeTrue();
 });
 
-it('refuses to copy a previous winter schedule after its teacher assignment changes', function () {
+it('keeps copied placements but applies the current teacher assignment', function () {
     $fixtures = createScheduleFixtures();
     $service = app(ScheduleService::class);
     $service->generateForGroup($fixtures['group'], '2025/2026', 'winter');
+    $sourceEntry = TimetableEntry::query()
+        ->where('group_id', $fixtures['group']->id)
+        ->where('academic_year', '2025/2026')
+        ->firstOrFail();
+    $service->moveEntry($sourceEntry, [
+        'teacher_id' => $fixtures['teacher']->id,
+        'room_id' => $fixtures['room']->id,
+        'cycle_week' => $sourceEntry->cycle_week,
+        'weekday_no' => $sourceEntry->weekday_no,
+        'start_time' => $sourceEntry->start_time,
+        'end_time' => $sourceEntry->end_time,
+        'duration_hours' => $sourceEntry->duration_hours,
+        'locked' => false,
+        'is_in_pool' => false,
+    ]);
     $replacementTeacher = Teacher::query()->create([
         'first_name' => 'Мария',
         'last_name' => 'Петрова',
@@ -695,8 +1032,38 @@ it('refuses to copy a previous winter schedule after its teacher assignment chan
         'teacher_id' => $replacementTeacher->id,
     ]);
 
-    expect(fn () => $service->copyPreviousWinter($fixtures['group'], '2026/2027'))
-        ->toThrow(ValidationException::class, 'преподавателските възлагания');
+    $result = $service->copyPreviousWinter($fixtures['group'], '2026/2027');
+    $targetEntries = TimetableEntry::query()
+        ->where('group_id', $fixtures['group']->id)
+        ->where('academic_year', '2026/2027')
+        ->get();
+
+    expect($result['copied'])->toBe(3)
+        ->and($targetEntries->pluck('teacher_id')->unique()->all())->toBe([$replacementTeacher->id])
+        ->and($targetEntries->where('is_in_pool', false)->count())->toBeGreaterThan(0);
+});
+
+it('copies a summer schedule independently using current curriculum data', function () {
+    $fixtures = createScheduleFixtures();
+    $fixtures['curriculumSubject']->update(['semester_no' => 2]);
+    $service = app(ScheduleService::class);
+    $service->generateForGroup($fixtures['group'], '2025/2026', 'summer');
+
+    $result = $service->copyPreviousTerm($fixtures['group'], '2026/2027', 'summer');
+    $targetEntries = TimetableEntry::query()
+        ->where('group_id', $fixtures['group']->id)
+        ->where('academic_year', '2026/2027')
+        ->where('semester_type', 'summer')
+        ->get();
+
+    expect($result)->toMatchArray(['copied' => 3, 'source_academic_year' => '2025/2026'])
+        ->and($targetEntries)->toHaveCount(3)
+        ->and($targetEntries->every(fn (TimetableEntry $entry): bool => $entry->semester_type === 'summer'))->toBeTrue()
+        ->and(TimetableEntry::query()
+            ->where('group_id', $fixtures['group']->id)
+            ->where('academic_year', '2026/2027')
+            ->where('semester_type', 'winter')
+            ->exists())->toBeFalse();
 });
 
 it('generates editable sessions on a preferred Saturday without configured time blocks', function () {
@@ -719,7 +1086,7 @@ it('generates editable sessions on a preferred Saturday without configured time 
         ->and($entries->pluck('duration_hours')->unique()->all())->toBe([4]);
 
     $admin = createScheduleAdmin();
-    $this->actingAs($admin)
+    $response = $this->actingAs($admin)
         ->get(route('schedules.index', [
             'group_id' => $fixtures['group']->id,
             'academic_year' => '2026/2027',
@@ -729,7 +1096,33 @@ it('generates editable sessions on a preferred Saturday without configured time 
         ->assertOk()
         ->assertSee('data-drop-week="1"', false)
         ->assertSee('name="start_time"', false)
+        ->assertSee('data-update-url="'.route('schedules.update', $entries->first()).'"', false)
+        ->assertSee('data-start-time="08:00"', false)
+        ->assertSee('data-duration-hours="4"', false)
         ->assertDontSee('schedule_period_id');
+
+    $poolEntry = TimetableEntry::query()
+        ->where('group_id', $fixtures['group']->id)
+        ->where('academic_year', '2026/2027')
+        ->where('is_in_pool', true)
+        ->firstOrFail();
+    $this->patchJson(route('schedules.update', $poolEntry), [
+        'cycle_week' => 1,
+        'weekday_no' => 1,
+        'day_part' => 'morning',
+        'start_time' => '08:00',
+        'end_time' => '11:45',
+        'duration_hours' => 4,
+        'coverage_type' => 'lecture',
+        'student_flow_id' => '',
+        'teacher_id' => $fixtures['teacher']->id,
+        'room_id' => $fixtures['room']->id,
+        'locked' => false,
+        'is_in_pool' => false,
+    ])->assertOk();
+
+    expect($poolEntry->fresh()->is_in_pool)->toBeFalse()
+        ->and($poolEntry->fresh()->start_time)->toBe('08:00:00');
 });
 
 it('generates separate lecture and exercise entries with their assigned teachers', function () {
@@ -774,8 +1167,8 @@ it('generates separate lecture and exercise entries with their assigned teachers
         ->and($entriesByType['lecture']->pluck('teacher_id')->unique()->all())->toBe([$fixtures['teacher']->id])
         ->and($entriesByType['exercise'])->toHaveCount(2)
         ->and($entriesByType['exercise']->pluck('teacher_id')->unique()->all())->toBe([$exerciseTeacher->id])
-        ->and($entriesByType['lecture']->pluck('duration_hours')->unique()->all())->toBe([4])
-        ->and($entriesByType['exercise']->pluck('duration_hours')->unique()->all())->toBe([4])
+        ->and($entriesByType['lecture']->pluck('duration_hours')->sort()->values()->all())->toBe([2, 4])
+        ->and($entriesByType['exercise']->pluck('duration_hours')->sort()->values()->all())->toBe([2, 4])
         ->and($result['unscheduled'])->toBeEmpty();
 
     expect(TimetableEntry::query()->where('group_id', $fixtures['group']->id)->where('is_in_pool', true)->count())->toBe(4);
@@ -844,7 +1237,8 @@ it('schedules a common flow lecture only once and exposes it to every member gro
         ->and(TimetableEntry::query()->where('student_flow_id', $flow->id)->where('is_in_pool', true)->count())->toBe(0)
         ->and(TimetableEntry::query()->where('student_flow_id', $flow->id)->where('is_in_pool', false)->count())->toBe(3)
         ->and(TimetableEntry::query()->where('student_flow_id', $flow->id)->where('is_in_pool', false)->value('weekday_no'))->toBe(2)
-        ->and(TimetableEntry::query()->where('student_flow_id', $flow->id)->where('is_in_pool', false)->value('start_time'))->toBe('08:00:00');
+        ->and(TimetableEntry::query()->where('student_flow_id', $flow->id)->where('is_in_pool', false)->value('start_time'))->toBe('08:00:00')
+        ->and(TimetableEntry::query()->where('student_flow_id', $flow->id)->value('teacher_id'))->toBe($fixtures['teacher']->id);
 
     $admin = createScheduleAdmin();
     $this->actingAs($admin)
@@ -1397,6 +1791,7 @@ it('removes surplus automatic pool blocks using the selected plan hours', functi
     expect($firstRefresh['removed'])->toBe(2)
         ->and($firstRefresh['added'])->toBe(0)
         ->and($secondRefresh['removed'])->toBe(0)
+        ->and($secondRefresh['updated'])->toBe(0)
         ->and(TimetableEntry::query()
             ->where('group_id', $fixtures['group']->id)
             ->where('subject_id', $fixtures['subject']->id)
@@ -1743,7 +2138,7 @@ it('shows all three weeks as drop targets and labels lecture and exercise teache
         ->assertDontSee('Иван Иванов, Иван Иванов');
 });
 
-it('allocates the 45-hour example in one recurring week and counts excess as self-study', function () {
+it('allocates the 45-hour example in one recurring week without changing plan self-study', function () {
     $fixtures = createScheduleFixtures();
     $exerciseTeacher = Teacher::query()->create([
         'first_name' => 'Георги',
@@ -1778,13 +2173,14 @@ it('allocates the 45-hour example in one recurring week and counts excess as sel
             $entries->min('weekday_no'),
             $entries->min('weekday_no') + 2,
         ))
-        ->and($entries->pluck('duration_hours')->unique()->all())->toBe([4])
+        ->and($entries->pluck('duration_hours')->sort()->values()->all())->toBe([2, 3, 4])
         ->and($analysis['auditorium_hours'])->toBe(45)
-        ->and($analysis['scheduled_hours'])->toBe(60)
-        ->and($analysis['self_study_hours'])->toBe(15);
+        ->and($analysis['scheduled_hours'])->toBe(45)
+        ->and($analysis['self_study_hours'])->toBe(5)
+        ->and($fixtures['curriculumSubject']->fresh()->self_study_hours)->toBe(5);
 });
 
-it('adds self-study hours to the scheduled workload', function () {
+it('keeps self-study attached to the curriculum and out of generated timetable blocks', function () {
     $fixtures = createScheduleFixtures();
     $fixtures['curriculumSubject']->update(['auditorium_hours' => 60, 'lecture_hours' => 60, 'self_study_hours' => 40]);
     $fixtures['teacher']->update(['weekly_workload_hours' => 0]);
@@ -1793,13 +2189,13 @@ it('adds self-study hours to the scheduled workload', function () {
 
     $entries = collect($result['entries'])->sortBy('weekday_no')->values();
 
-    expect($entries)->toHaveCount(5)
+    expect($entries)->toHaveCount(3)
         ->and(collect($result['entries'])->max('weekday_no'))->toBeLessThanOrEqual(5)
-        ->and(collect($result['entries'])->pluck('weekday_no')->unique())->toHaveCount(5)
-        ->and($entries->pluck('auditorium_hours')->map(fn ($hours): float => (float) $hours)->all())->toBe([3.0, 3.0, 2.0, 2.0, 2.0])
-        ->and($entries->pluck('self_study_hours')->map(fn ($hours): float => (float) $hours)->all())->toBe([1.0, 1.0, 2.0, 2.0, 2.0])
+        ->and(collect($result['entries'])->pluck('weekday_no')->unique())->toHaveCount(3)
+        ->and($entries->pluck('auditorium_hours')->map(fn ($hours): float => (float) $hours)->all())->toBe([4.0, 4.0, 4.0])
         ->and($entries->sum('auditorium_hours') * 5)->toBe(60.0)
-        ->and($entries->sum('self_study_hours') * 5)->toBe(40.0);
+        ->and($fixtures['curriculumSubject']->fresh()->self_study_hours)->toBe(40)
+        ->and(Schema::hasColumn('timetable_entries', 'self_study_hours'))->toBeFalse();
 });
 
 it('uses default schedule times without exposing configurable generator blocks', function () {
@@ -1901,7 +2297,7 @@ it('allows mandatory plan subjects to be switched off and filters visible plan s
     expect(collect($result['entries'])->where('subject_id', $fixtures['subject']->id))->toBeEmpty();
 });
 
-it('allows editing generated self-study in the pool and clears it when the block is returned', function () {
+it('does not expose per-block self-study editing and preserves the curriculum value', function () {
     $fixtures = createScheduleFixtures();
     $fixtures['curriculumSubject']->update(['self_study_hours' => 40]);
     $admin = createScheduleAdmin();
@@ -1913,33 +2309,14 @@ it('allows editing generated self-study in the pool and clears it when the block
         'group_id' => $fixtures['group']->id,
         'academic_year' => '2026/2027',
         'semester_type' => 'winter',
-    ]))->assertOk()->assertSee('name="self_study_hours"', false);
-
-    $this->patch(route('schedules.update', $entry), [
-        'group_id' => $fixtures['group']->id,
-        'academic_year' => '2026/2027',
-        'semester_type' => 'winter',
-        'cycle_week' => $entry->cycle_week,
-        'weekday_no' => $entry->weekday_no,
-        'day_part' => $entry->day_part ?? 'morning',
-        'start_time' => substr($entry->start_time, 0, 5),
-        'end_time' => substr($entry->end_time, 0, 5),
-        'duration_hours' => $entry->duration_hours,
-        'teacher_id' => $entry->teacher_id,
-        'room_id' => $entry->room_id,
-        'coverage_type' => $entry->coverage_type,
-        'student_flow_id' => '',
-        'locked' => false,
-        'is_in_pool' => 1,
-        'self_study_hours' => 2.5,
-    ])->assertRedirect()->assertSessionHasNoErrors();
-    expect((float) $entry->fresh()->self_study_hours)->toBe(2.5);
+    ]))->assertOk()->assertDontSee('name="self_study_hours"', false)
+        ->assertDontSee('Самоподготовка за този блок');
 
     app(ScheduleService::class)->parkEntry($entry->fresh());
-    expect((float) $entry->fresh()->self_study_hours)->toBe(0.0);
+    expect($fixtures['curriculumSubject']->fresh()->self_study_hours)->toBe(40);
 });
 
-it('resets adjusted automatic self-study when the schedule is generated again', function () {
+it('does not modify curriculum self-study when the schedule is generated again', function () {
     $fixtures = createScheduleFixtures();
     $fixtures['curriculumSubject']->update(['self_study_hours' => 40]);
 
@@ -1956,7 +2333,6 @@ it('resets adjusted automatic self-study when the schedule is generated again', 
         'room_id' => $entry->room_id,
         'locked' => false,
         'is_in_pool' => true,
-        'self_study_hours' => 2.5,
     ]);
 
     $service->generateForGroup($fixtures['group'], '2026/2027', 'winter');
@@ -1968,9 +2344,9 @@ it('resets adjusted automatic self-study when the schedule is generated again', 
         ->orderBy('weekday_no')
         ->get();
 
-    expect($regeneratedEntries->where('is_in_pool', true))->toHaveCount(5)
-        ->and($regeneratedEntries->pluck('self_study_hours')->map(fn ($hours): float => (float) $hours)->all())->toBe([1.0, 1.0, 2.0, 2.0, 2.0])
-        ->and((float) $regeneratedEntries->sum('self_study_hours') * 5)->toBe(40.0);
+    expect($regeneratedEntries->where('is_in_pool', true))->toHaveCount(3)
+        ->and($fixtures['curriculumSubject']->fresh()->self_study_hours)->toBe(40)
+        ->and(Schema::hasColumn('timetable_entries', 'self_study_hours'))->toBeFalse();
 });
 
 it('sorts subjects and filters by curriculum inclusion', function () {
@@ -2056,7 +2432,7 @@ it('allows changing a group curriculum version only within its specialty', funct
     ])->assertSessionHasErrors('curriculum_version_id');
 });
 
-it('filters schedule groups by their curriculum current semester', function () {
+it('filters schedule groups by course and derives the curriculum semester from the term', function () {
     $fixtures = createScheduleFixtures();
     $admin = createScheduleAdmin();
     $secondVersion = CurriculumVersion::query()->create([
@@ -2073,13 +2449,25 @@ it('filters schedule groups by their curriculum current semester', function () {
         'group_name' => 'А',
         'student_count' => 20,
     ]);
+    $summerSubject = Subject::query()->create([
+        'code' => 'RIS-202',
+        'name' => 'Лятно рисуване',
+    ]);
+    CurriculumSubject::query()->create([
+        'curriculum_version_id' => $secondVersion->id,
+        'subject_id' => $summerSubject->id,
+        'semester_no' => 4,
+        'course_year' => 2,
+        'auditorium_hours' => 30,
+        'lecture_hours' => 30,
+    ]);
 
     $this->actingAs($admin)
-        ->get(route('schedules.index', ['current_semester' => 2]))
+        ->get(route('schedules.index', ['semester_type' => 'summer', 'course_year' => 2]))
         ->assertOk()
-        ->assertViewHas('currentSemester', 2)
         ->assertViewHas('groups', fn ($groups): bool => $groups->pluck('id')->all() === [$secondGroup->id])
-        ->assertViewHas('selectedGroup', fn ($group): bool => $group?->id === $secondGroup->id);
+        ->assertViewHas('selectedGroup', fn ($group): bool => $group?->id === $secondGroup->id)
+        ->assertViewHas('semesterNo', 4);
 });
 
 it('limits department heads to viewing teachers in their assigned department', function () {
@@ -2132,14 +2520,14 @@ it('limits department heads to viewing teachers in their assigned department', f
 it('lets administrators assign and remove department-head access', function () {
     $admin = createScheduleAdmin();
     $user = User::factory()->create();
-    Teacher::query()->create([
+    $teacher = Teacher::query()->create([
         'first_name' => 'Иван',
         'last_name' => 'Иванов',
-        'department' => 'Катедра по изкуства',
         'max_daily_hours' => 8,
         'weekly_workload_hours' => 0,
         'active' => true,
     ]);
+    $teacher->assignDepartment('Катедра по изкуства');
 
     $this->actingAs($admin)
         ->patch(route('catalog.department-head.update'), [
@@ -2387,7 +2775,7 @@ it('uses Saturday as overflow when weekday blocks are full despite the default w
         ->and($result['unscheduled'])->toBeEmpty();
 });
 
-it('turns scheduled excess into self-study during the explicit schedule test', function () {
+it('reports scheduled excess without changing plan self-study during the explicit schedule test', function () {
     $fixtures = createScheduleFixtures();
     foreach (range(1, 4) as $weekdayNo) {
         TimetableEntry::query()->create([
@@ -2408,11 +2796,10 @@ it('turns scheduled excess into self-study during the explicit schedule test', f
 
     $warnings = app(ScheduleService::class)->testSchedule($fixtures['group'], '2026/2027', 'winter');
 
-    expect($fixtures['curriculumSubject']->fresh()->self_study_hours)->toBe(20)
-        ->and(collect($warnings)->pluck('reason')->join(' '))->toContain('са добавени 20 ч.')
-        ->and(collect($warnings)->pluck('reason')->join(' '))->not->toContain('надвишава планираните')
+    expect($fixtures['curriculumSubject']->fresh()->self_study_hours)->toBeNull()
+        ->and(collect($warnings)->pluck('reason')->join(' '))->toContain('20 ч. над плана')
         ->and(collect(app(ScheduleService::class)->testSchedule($fixtures['group'], '2026/2027', 'winter'))
-            ->pluck('reason')->join(' '))->not->toContain('са добавени');
+            ->pluck('reason')->join(' '))->toContain('20 ч. над плана');
 });
 
 it('reports when a group or teacher exceeds ten teaching hours in a day', function () {
@@ -2772,8 +3159,8 @@ it('keeps hours missing from the lecture and exercise split unassigned instead o
         ->and($unsplitEntry)->not->toBeNull()
         ->and($unsplitEntry->teacher_id)->toBeNull()
         ->and(collect($result['warnings'])->pluck('reason')->join(' '))->toContain('без преподавател')
-        ->and($result['analysis'][0]['scheduled_hours'])->toBe(60)
-        ->and($result['analysis'][0]['self_study_hours'])->toBe(10);
+        ->and($result['analysis'][0]['scheduled_hours'])->toBe(50)
+        ->and($result['analysis'][0]['self_study_hours'])->toBe(0);
 });
 
 it('preserves legacy schedule generation when no teacher assignment exists', function () {

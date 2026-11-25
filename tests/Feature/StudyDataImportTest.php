@@ -2,6 +2,7 @@
 
 use App\Models\CurriculumSubject;
 use App\Models\CurriculumVersion;
+use App\Models\Department;
 use App\Models\Specialty;
 use App\Models\StudentFlow;
 use App\Models\StudentGroup;
@@ -10,6 +11,7 @@ use App\Models\Teacher;
 use App\Models\TimetableEntry;
 use App\Models\User;
 use App\Services\ScheduleService;
+use App\Services\StudyDataImportService;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\DB;
@@ -674,6 +676,173 @@ it('previews and imports PlanAZ rows without requiring one curriculum version', 
         ->and($teacher->last_name)->toBe('Иванов');
 });
 
+it('hides an unnumbered course group from selectors when numbered subgroups exist', function () {
+    $admin = createStudyImportAdmin();
+    $specialty = Specialty::query()->create(['name' => 'Графичен дизайн и визуални комуникации']);
+    $version = CurriculumVersion::query()->create([
+        'specialty_id' => $specialty->id,
+        'name' => 'Учебен план 2026',
+        'version_year' => 2026,
+        'is_active' => true,
+    ]);
+    $subject = Subject::query()->create([
+        'code' => 'GD-101',
+        'name' => 'Основи на графичния дизайн',
+    ]);
+    CurriculumSubject::query()->create([
+        'curriculum_version_id' => $version->id,
+        'subject_id' => $subject->id,
+        'semester_no' => 1,
+        'course_year' => 1,
+        'auditorium_hours' => 60,
+        'lecture_hours' => 60,
+        'is_selected' => true,
+    ]);
+
+    foreach ([null, '1', '2'] as $groupName) {
+        StudentGroup::query()->create([
+            'specialty_id' => $specialty->id,
+            'curriculum_version_id' => $version->id,
+            'course_year' => 1,
+            'group_name' => $groupName,
+            'student_count' => 10,
+        ]);
+    }
+
+    $singleGroupSpecialty = Specialty::query()->create(['name' => 'Графика']);
+    $singleGroupVersion = CurriculumVersion::query()->create([
+        'specialty_id' => $singleGroupSpecialty->id,
+        'name' => 'Учебен план 2026',
+        'version_year' => 2026,
+        'is_active' => true,
+    ]);
+    $singleGroupSubject = Subject::query()->create([
+        'code' => 'GR-101',
+        'name' => 'Основи на графиката',
+    ]);
+    CurriculumSubject::query()->create([
+        'curriculum_version_id' => $singleGroupVersion->id,
+        'subject_id' => $singleGroupSubject->id,
+        'semester_no' => 1,
+        'course_year' => 1,
+        'auditorium_hours' => 60,
+        'lecture_hours' => 60,
+        'is_selected' => true,
+    ]);
+    StudentGroup::query()->create([
+        'specialty_id' => $singleGroupSpecialty->id,
+        'curriculum_version_id' => $singleGroupVersion->id,
+        'course_year' => 1,
+        'group_name' => null,
+        'student_count' => 20,
+    ]);
+
+    $this->actingAs($admin)
+        ->get(route('catalog.index', ['tab' => 'organization']))
+        ->assertOk()
+        ->assertSee('Графичен дизайн и визуални комуникации · 1 курс · група 1')
+        ->assertSee('Графичен дизайн и визуални комуникации · 1 курс · група 2')
+        ->assertDontSee('Графичен дизайн и визуални комуникации · 1 курс</strong>')
+        ->assertSee('Графика · 1 курс');
+
+    $scheduleResponse = $this->get(route('schedules.index'))->assertOk();
+    expect($scheduleResponse->viewData('groups')->pluck('group_name')->all())->toBe(['1', '2', null]);
+
+    $scheduleResponse
+        ->assertSee('Графичен дизайн и визуални комуникации - група 1')
+        ->assertSee('Графичен дизайн и визуални комуникации - група 2')
+        ->assertSee('Графика')
+        ->assertDontSee('Графика - група 1')
+        ->assertDontSee('<optgroup', false)
+        ->assertDontSee('Графичен дизайн и визуални комуникации · 1 курс</option>');
+
+    expect(StudentGroup::query()
+        ->hideUnnumberedIfSubgroupsExist()
+        ->where('specialty_id', $specialty->id)
+        ->pluck('group_name')
+        ->all())->toBe(['1', '2'])
+        ->and(StudentGroup::query()
+            ->hideUnnumberedIfSubgroupsExist()
+            ->where('specialty_id', $singleGroupSpecialty->id)
+            ->pluck('group_name')
+            ->all())->toBe([null]);
+});
+
+it('maps legacy PlanAZ specialty labels to the current specialty and curriculum version', function () {
+    $admin = createStudyImportAdmin();
+    $specialty = Specialty::query()->create(['name' => 'Графика']);
+    $version = CurriculumVersion::query()->create([
+        'specialty_id' => $specialty->id,
+        'name' => 'Учебен план 2026',
+        'version_year' => 2026,
+        'is_active' => true,
+    ]);
+
+    $response = $this->actingAs($admin)
+        ->post(route('imports.preview'), [
+            'kind' => 'teachers',
+            'employment_category' => 'full_time',
+            'academic_year' => '2026/2027',
+            'file' => UploadedFile::fake()->createWithContent(
+                'PlanAZ.html',
+                planAzHtml(specialtyName: 'Изящни изкуства - Графика Вече няма такава - ССО'),
+            ),
+        ])
+        ->assertOk();
+
+    expect($response->viewData('preview')['rows'][0]['specialty_name'])->toBe('Графика');
+
+    $this->post(route('imports.confirm'), [
+        'token' => $response->viewData('token'),
+        'subjects' => [0 => 'create'],
+        'teachers' => [0 => 'create'],
+    ])->assertRedirect(route('catalog.index'));
+
+    $this->assertDatabaseCount('specialties', 1);
+    $this->assertDatabaseHas('student_groups', [
+        'specialty_id' => $specialty->id,
+        'curriculum_version_id' => $version->id,
+        'course_year' => 1,
+        'group_name' => '1',
+    ]);
+});
+
+it('uses the active curriculum version when a cohort-specific plan is missing', function () {
+    $admin = createStudyImportAdmin();
+    $specialty = Specialty::query()->create(['name' => 'Изобразително изкуство']);
+    CurriculumVersion::query()->create([
+        'specialty_id' => $specialty->id,
+        'name' => 'Учебен план 2026',
+        'version_year' => 2026,
+        'is_active' => true,
+    ]);
+
+    $response = $this->actingAs($admin)
+        ->post(route('imports.preview'), [
+            'kind' => 'teachers',
+            'employment_category' => 'full_time',
+            'academic_year' => '2026/2027',
+            'file' => UploadedFile::fake()->createWithContent(
+                'PlanAZ.html',
+                planAzHtml(rows: [['Рисуване', 'Изобразително изкуство', '2', '3', '1', 'Л', '30', '24']]),
+            ),
+        ])
+        ->assertOk();
+
+    $this->post(route('imports.confirm'), [
+        'token' => $response->viewData('token'),
+        'subjects' => [0 => 'create'],
+        'teachers' => [0 => 'create'],
+    ])->assertRedirect(route('catalog.index'));
+
+    $this->assertDatabaseHas('student_groups', [
+        'specialty_id' => $specialty->id,
+        'curriculum_version_id' => CurriculumVersion::query()->where('specialty_id', $specialty->id)->value('id'),
+        'course_year' => 2,
+        'group_name' => '1',
+    ]);
+});
+
 it('associates each PlanAZ table with its preceding teacher name and strips workload metadata', function () {
     $admin = createStudyImportAdmin();
     $existingTeacher = Teacher::query()->create([
@@ -688,9 +857,9 @@ it('associates each PlanAZ table with its preceding teacher name and strips work
     $table = fn (array $row): string => '<table><tr>'.implode('', array_map(fn (string $header): string => '<th>'.$header.'</th>', $headers))
         .'</tr><tr>'.implode('', array_map(fn (string $cell): string => '<td>'.$cell.'</td>', $row)).'</tr></table>';
     $html = '<!doctype html><html lang="bg"><meta charset="utf-8"><body>'
-        .'<p><span class="h3">ас.</span> <span class="h3">Борислав</span> <span class="h3">Александров</span> <span class="h3">Петров</span> Задължителен норматив: 0 Възложен и редуциран: 24</p>'
+        .'<p><span class="h3">ас.</span> <span class="h3">Борислав</span> <span class="h3">Александров</span> <span class="h3">Петров</span> Задължителен норматив: 0 Възложен и редуциран: 24 · Факултет по изобразително изкуство Катедра "Катедра Рисуване"</p>'
         .$table(['Рисуване', 'Задължителна', 'Изобразително изкуство - ССО', 'РФ', '1', '1', '1', 'Л', '24', '24'])
-        .'<p><span class="h3">доц.</span> <span class="h3">Мария</span> <span class="h3">Стефанова</span> <span class="h3">Иванова</span> Задължителен норматив: 80 Възложен и редуциран: 18</p>'
+        .'<p><span class="h3">доц.</span> <span class="h3">Мария</span> <span class="h3">Стефанова</span> <span class="h3">Иванова</span> Задължителен норматив: 80 Възложен и редуциран: 18 · Факултет по изобразително изкуство Катедра "Катедра Композиция"</p>'
         .$table(['Композиция', 'Задължителна', 'Изобразително изкуство - ССО', 'РФ', '1', '1', '2', 'У', '18', '20'])
         .'</body></html>';
 
@@ -709,9 +878,11 @@ it('associates each PlanAZ table with its preceding teacher name and strips work
         ->and($preview['rows'][0]['teacher_parts']['first_name'])->toBe('Борислав Александров')
         ->and($preview['rows'][0]['teacher_parts']['last_name'])->toBe('Петров')
         ->and($preview['rows'][0]['teacher_total_assigned_hours'])->toBe(24)
+        ->and($preview['rows'][0]['department_name'])->toBe('Катедра Рисуване')
         ->and($preview['rows'][1]['teacher_name'])->toBe('доц. Мария Стефанова Иванова')
         ->and($preview['rows'][1]['teacher_candidates'][0]['id'])->toBe($existingTeacher->id)
-        ->and($preview['rows'][1]['teacher_total_assigned_hours'])->toBe(18);
+        ->and($preview['rows'][1]['teacher_total_assigned_hours'])->toBe(18)
+        ->and($preview['rows'][1]['department_name'])->toBe('Катедра Композиция');
 
     $this->post(route('imports.confirm'), [
         'token' => $response->viewData('token'),
@@ -720,6 +891,9 @@ it('associates each PlanAZ table with its preceding teacher name and strips work
     ])->assertRedirect(route('catalog.index'));
 
     $createdTeacher = Teacher::query()->where('last_name', 'Петров')->firstOrFail();
+    expect($createdTeacher->departmentRecord?->name)->toBe('Катедра Рисуване')
+        ->and($existingTeacher->fresh()->departmentRecord?->name)->toBe('Катедра Композиция')
+        ->and(Department::query()->count())->toBe(2);
     $this->assertDatabaseHas('teacher_assignments', [
         'teacher_id' => $createdTeacher->id,
         'subject_id' => Subject::query()->where('name', 'Рисуване')->value('id'),
@@ -956,6 +1130,28 @@ it('creates an imported student flow from the anchor row and following in-flow r
         ->and($flow->groups()->pluck('student_groups.id')->sort()->values()->all())->toBe([$groupOne->id, $groupTwo->id]);
     $this->assertDatabaseCount('teacher_assignments', 2);
 
+    $flow->groups()->detach($groupOne->id);
+    $repeatImport = app(StudyDataImportService::class)->confirm($preview, [
+        'subjects' => [0 => (string) $subject->id, 1 => (string) $subject->id],
+        'teachers' => [0 => (string) $teacher->id, 1 => (string) $teacher->id],
+    ]);
+
+    $newFlow = StudentFlow::query()->where('name', 'Цветознание - поток (2)')->firstOrFail();
+    expect($repeatImport['created'])->toBe(0)
+        ->and(StudentFlow::query()->count())->toBe(2)
+        ->and($flow->groups()->pluck('student_groups.id')->all())->toBe([$groupTwo->id])
+        ->and($newFlow->groups()->pluck('student_groups.id')->sort()->values()->all())->toBe([$groupOne->id, $groupTwo->id]);
+    $this->assertDatabaseCount('teacher_assignments', 2);
+
+    app(StudyDataImportService::class)->confirm($preview, [
+        'subjects' => [0 => (string) $subject->id, 1 => (string) $subject->id],
+        'teachers' => [0 => (string) $teacher->id, 1 => (string) $teacher->id],
+    ]);
+    expect(StudentFlow::query()->count())->toBe(2);
+    $flow->groups()->detach($groupTwo->id);
+    $flow->delete();
+    $flow = $newFlow;
+
     $service = app(ScheduleService::class);
     $first = $service->generateForGroup($groupOne, '2026/2027', 'winter');
     $service->generateForGroup($groupTwo, '2026/2027', 'winter');
@@ -1066,7 +1262,10 @@ it('imports a department for a teacher and does not erase it when the source omi
         'subjects' => [0 => 'create'],
         'teachers' => [0 => (string) $teacher->id],
     ])->assertRedirect();
-    expect($teacher->fresh()->department)->toBe('Нова катедра');
+    expect($teacher->fresh()->department)->toBe('Нова катедра')
+        ->and($teacher->fresh()->departmentRecord?->name)->toBe('Нова катедра')
+        ->and(Department::query()->count())->toBe(1);
+    $departmentId = $teacher->fresh()->department_id;
 
     $withoutDepartment = submitStudyImportPreview('teachers', null, planAzHtml())->assertOk();
     $this->post(route('imports.confirm'), [
@@ -1074,7 +1273,9 @@ it('imports a department for a teacher and does not erase it when the source omi
         'subjects' => [0 => 'create'],
         'teachers' => [0 => (string) $teacher->id],
     ])->assertRedirect();
-    expect($teacher->fresh()->department)->toBe('Нова катедра');
+    expect($teacher->fresh()->department)->toBe('Нова катедра')
+        ->and($teacher->fresh()->department_id)->toBe($departmentId)
+        ->and(Department::query()->count())->toBe(1);
 });
 
 it('imports separate staff and honorary files without duplicating a teacher', function () {

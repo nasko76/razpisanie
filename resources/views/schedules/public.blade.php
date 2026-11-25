@@ -80,6 +80,15 @@
         <div class="layout">
             <form class="panel filters" method="GET" action="{{ route('home') }}" id="schedule-filters">
                 <h2>Избор на разписание</h2>
+                <label for="term">Учебен семестър</label>
+                <select id="term" name="term" onchange="this.form.submit()">
+                    @foreach($termOptions as $termOption)
+                        <option value="{{ $termOption->academic_year }}|{{ $termOption->semester_type }}" @selected($selectedTermKey === $termOption->academic_year.'|'.$termOption->semester_type)>
+                            {{ $termOption->semester_type === 'winter' ? 'Зима ' : 'Лято ' }}{{ $termOption->academic_year }}{{ $termOption->status === \App\Models\AcademicTerm::CURRENT ? ' · текущ' : ' · архив' }}
+                        </option>
+                    @endforeach
+                </select>
+
                 <label for="specialty_id">Специалност</label>
                 <select id="specialty_id" name="specialty_id" required>
                     <option value="">Изберете специалност</option>

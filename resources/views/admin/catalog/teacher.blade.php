@@ -142,12 +142,10 @@
                 $placedTeacherEntries = $teacherScheduleLoads->where('is_in_pool', false);
                 $semesterWeeks = 5;
                 $semesterAuditoriumHours = (float) $placedTeacherEntries->sum('auditorium_hours') * $semesterWeeks;
-                $semesterSelfStudyHours = (float) $placedTeacherEntries->sum('self_study_hours') * $semesterWeeks;
-                $semesterTotalHours = $semesterAuditoriumHours + $semesterSelfStudyHours;
             @endphp
             <p class="muted">
-                {{ $semesterTotalHours }} часа общо за 15-седмичен семестър
-                (АЗ {{ $semesterAuditoriumHours }} ч. · самоподготовка {{ $semesterSelfStudyHours }} ч.).
+                {{ $semesterAuditoriumHours }} аудиторни часа за 15-седмичен семестър.
+                Самоподготовката се задава отделно към дисциплината в съответния учебен план.
                 Заданията са показани по седмица от триседмичния цикъл, ден и част от деня.
             </p>
             <div class="table-wrap">
@@ -186,7 +184,6 @@
                                                     @forelse($cellEntries as $entry)
                                                         @php
                                                             $auditoriumHours = rtrim(rtrim(number_format((float) $entry->auditorium_hours, 2, '.', ''), '0'), '.');
-                                                            $selfStudyHours = rtrim(rtrim(number_format((float) $entry->self_study_hours, 2, '.', ''), '0'), '.');
                                                             $semesterParity = $scope->semester_type === 'winter' ? 1 : 0;
                                                             $entryGroups = $entry->studentFlow?->groups->isNotEmpty()
                                                                 ? $entry->studentFlow->groups
@@ -215,7 +212,7 @@
                                                             <strong>{{ $entry->subject?->name ?? $entry->custom_subject_name }}</strong><br>
                                                             <span class="muted">{{ substr($entry->start_time, 0, 5) }}–{{ substr($entry->end_time, 0, 5) }} · {{ $entry->duration_hours }} уч. ч.</span><br>
                                                             <span class="muted">{{ $coverageLabel }} · {{ $groupLabels }}</span><br>
-                                                            <span class="muted">АЗ {{ $auditoriumHours }} ч. · Самоподготовка {{ $selfStudyHours }} ч.</span>
+                                                            <span class="muted">АЗ {{ $auditoriumHours }} ч.</span>
                                                         </span>
                                                     @empty
                                                         <span class="muted">—</span>

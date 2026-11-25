@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\AcademicTerm;
 use App\Models\CurriculumSubject;
 use App\Models\Room;
 use App\Models\ScheduleNote;
@@ -18,6 +19,7 @@ use Illuminate\Http\Response;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Response as ResponseFacade;
+use Illuminate\Validation\Rule;
 use Illuminate\Validation\ValidationException;
 use Illuminate\View\View;
 use Symfony\Component\HttpFoundation\StreamedResponse;
@@ -26,40 +28,80 @@ class ScheduleController extends Controller
 {
     public function index(Request $request, ScheduleService $scheduleService): View
     {
+        $currentTerm = AcademicTerm::query()->where('status', AcademicTerm::CURRENT)->first();
+        $currentAcademicYear = $currentTerm?->academic_year ?? $this->defaultAcademicYear();
+        $academicYearOptions = collect([
+            $currentAcademicYear,
+            $this->nextAcademicYear(),
+        ])
+            ->concat(AcademicTerm::query()->pluck('academic_year'))
+            ->concat(TimetableEntry::query()->distinct()->orderByDesc('academic_year')->pluck('academic_year'))
+            ->concat(ScheduleNote::query()->distinct()->orderByDesc('academic_year')->pluck('academic_year'))
+            ->concat(DB::table('teacher_assignments')->whereNotNull('academic_year')->distinct()->orderByDesc('academic_year')->pluck('academic_year'))
+            ->filter()
+            ->unique()
+            ->sortByDesc(fn (string $year): int => (int) explode('/', $year)[0])
+            ->values();
+        $courseYearOptions = range(1, 4);
+
         $filters = $request->validate([
             'group_id' => ['nullable', 'integer', 'exists:student_groups,id'],
-            'academic_year' => ['nullable', 'string', 'max:20'],
+            'academic_year' => ['nullable', 'string', 'max:20', Rule::in($academicYearOptions->all())],
             'semester_type' => ['nullable', 'in:winter,summer'],
-            'current_semester' => ['nullable', 'integer', 'between:1,4'],
+            'course_year' => ['nullable', 'integer', 'between:1,4'],
             'cycle_week' => ['nullable', 'integer', 'between:1,3'],
         ]);
+        $academicYear = $filters['academic_year'] ?? $currentAcademicYear;
+        $termForAcademicYear = AcademicTerm::query()
+            ->where('academic_year', $academicYear)
+            ->whereIn('status', [AcademicTerm::CURRENT, AcademicTerm::PLANNING])
+            ->orderByRaw('CASE WHEN status = ? THEN 0 ELSE 1 END', [AcademicTerm::CURRENT])
+            ->first();
+        $semesterType = $filters['semester_type']
+            ?? $termForAcademicYear?->semester_type
+            ?? $currentTerm?->semester_type
+            ?? 'winter';
+        $courseYear = (int) ($filters['course_year'] ?? 1);
+        $semesterNo = $courseYear * 2 - ($semesterType === 'winter' ? 1 : 0);
 
         $groupsQuery = StudentGroup::query()
+            ->hideUnnumberedIfSubgroupsExist()
             ->with(['specialty', 'curriculumVersion'])
             ->orderBy('specialty_id')
             ->orderBy('course_year')
-            ->orderBy('group_name');
-        if (isset($filters['current_semester'])) {
-            $groupsQuery->whereHas('curriculumVersion', fn ($query) => $query->where('current_semester', $filters['current_semester']));
-        }
+            ->orderBy('group_name')
+            ->where('course_year', $courseYear);
+        $groupsQuery->where(function ($query) use ($semesterType, $semesterNo): void {
+            $query->whereHas('curriculumVersion.subjects', function ($subjects) use ($semesterNo): void {
+                $subjects->whereColumn('curriculum_subjects.course_year', 'student_groups.course_year')
+                    ->where('curriculum_subjects.semester_no', $semesterNo)
+                    ->where('curriculum_subjects.is_selected', true);
+            })
+                ->orWhereHas('timetableEntries', fn ($entries) => $entries
+                    ->where('semester_type', $semesterType))
+                ->orWhereHas('studentFlows.timetableEntries', fn ($entries) => $entries
+                    ->where('semester_type', $semesterType));
+        });
         $groups = $groupsQuery->get();
 
         $selectedGroup = isset($filters['group_id'])
             ? $groups->firstWhere('id', (int) $filters['group_id'])
             : $groups->first();
-        $academicYear = $filters['academic_year'] ?? $this->defaultAcademicYear();
-        $semesterType = $filters['semester_type'] ?? 'winter';
+        $selectedTermStatus = AcademicTerm::query()
+            ->where('academic_year', $academicYear)
+            ->where('semester_type', $semesterType)
+            ->value('status');
+        $isHistoricalAcademicYear = $this->isHistoricalAcademicYear($academicYear, $semesterType);
         $cycleWeek = (int) ($filters['cycle_week'] ?? 1);
         $entries = collect();
         $curriculumSubjects = collect();
 
         if ($selectedGroup !== null) {
-            $semesterParity = $semesterType === 'winter' ? 1 : 0;
             $curriculumSubjects = CurriculumSubject::query()
                 ->with('subject')
                 ->where('curriculum_version_id', $selectedGroup->curriculum_version_id)
                 ->where('course_year', $selectedGroup->course_year)
-                ->whereRaw('semester_no % 2 = ?', [$semesterParity])
+                ->where('semester_no', $semesterNo)
                 ->orderBy('semester_no')
                 ->get();
             $entries = TimetableEntry::query()
@@ -103,7 +145,6 @@ class ScheduleController extends Controller
                         'all_standard_blocks' => $blocks->every(fn (TimetableEntry $block): bool => (int) $block->duration_hours === 4),
                         'remaining_hours' => (int) $blocks->sum('duration_hours') * 5,
                         'auditorium_hours' => (float) $blocks->sum('auditorium_hours') * 5,
-                        'self_study_hours' => (float) $blocks->sum('self_study_hours') * 5,
                         'coverage_types' => $blocks->pluck('coverage_type')
                             ->filter()
                             ->unique()
@@ -122,8 +163,14 @@ class ScheduleController extends Controller
             'groups' => $groups,
             'selectedGroup' => $selectedGroup,
             'academicYear' => $academicYear,
+            'currentAcademicYear' => $currentAcademicYear,
+            'academicYearOptions' => $academicYearOptions,
+            'selectedTermStatus' => $selectedTermStatus,
+            'isHistoricalAcademicYear' => $isHistoricalAcademicYear,
             'semesterType' => $semesterType,
-            'currentSemester' => isset($filters['current_semester']) ? (int) $filters['current_semester'] : null,
+            'courseYear' => $courseYear,
+            'semesterNo' => $semesterNo,
+            'courseYearOptions' => $courseYearOptions,
             'cycleWeek' => $cycleWeek,
             'curriculumSubjects' => $curriculumSubjects,
             'note' => $selectedGroup === null ? null : ScheduleNote::query()
@@ -162,7 +209,9 @@ class ScheduleController extends Controller
             'group_id' => ['required', 'integer', 'exists:student_groups,id'],
             'academic_year' => ['required', 'string', 'max:20'],
             'semester_type' => ['required', 'in:winter,summer'],
+            'course_year' => ['nullable', 'integer', 'between:1,4'],
         ]);
+        $this->assertEditableAcademicYear($data['academic_year'], $data['semester_type']);
 
         $group = StudentGroup::query()->findOrFail($data['group_id']);
         $result = $scheduleService->generateForGroup($group, $data['academic_year'], $data['semester_type']);
@@ -173,31 +222,29 @@ class ScheduleController extends Controller
             $status .= ' Някои занятия изискват допълнителна проверка.';
         }
 
-        return redirect()->route('schedules.index', [
-            'group_id' => $group->id,
-            'academic_year' => $data['academic_year'],
-            'semester_type' => $data['semester_type'],
-        ])->with([
+        return redirect()->route('schedules.index', $this->scheduleIndexParameters($request))->with([
             'status' => $status,
         ]);
     }
 
-    public function copyPreviousWinter(Request $request, ScheduleService $scheduleService): RedirectResponse
+    public function copyPreviousTerm(Request $request, ScheduleService $scheduleService): RedirectResponse
     {
         $data = $request->validate([
             'group_id' => ['required', 'integer', 'exists:student_groups,id'],
             'academic_year' => ['required', 'string', 'max:20'],
+            'semester_type' => ['required', 'in:winter,summer'],
+            'course_year' => ['nullable', 'integer', 'between:1,4'],
         ]);
+        $this->assertEditableAcademicYear($data['academic_year'], $data['semester_type']);
         $group = StudentGroup::query()->findOrFail($data['group_id']);
-        $result = $scheduleService->copyPreviousWinter($group, $data['academic_year']);
+        $result = $scheduleService->copyPreviousTerm($group, $data['academic_year'], $data['semester_type']);
 
         return redirect()->route('schedules.index', [
-            'group_id' => $group->id,
-            'academic_year' => $data['academic_year'],
-            'semester_type' => 'winter',
+            ...$this->scheduleIndexParameters($request),
+            'semester_type' => $data['semester_type'],
         ])->with(
             'status',
-            'Копирани са '.$result['copied'].' занятия от зимния семестър '.$result['source_academic_year']
+            'Копирани са '.$result['copied'].' занятия от '.($data['semester_type'] === 'winter' ? 'зимния' : 'летния').' семестър '.$result['source_academic_year']
                 .' в '.$data['academic_year'].'. Вече поставените целеви потоци са запазени.',
         );
     }
@@ -208,7 +255,9 @@ class ScheduleController extends Controller
             'group_id' => ['required', 'integer', 'exists:student_groups,id'],
             'academic_year' => ['required', 'string', 'max:20'],
             'semester_type' => ['required', 'in:winter,summer'],
+            'course_year' => ['nullable', 'integer', 'between:1,4'],
         ]);
+        $this->assertEditableAcademicYear($data['academic_year'], $data['semester_type']);
         $group = StudentGroup::query()->findOrFail($data['group_id']);
         $result = $scheduleService->refreshForGroup($group, $data['academic_year'], $data['semester_type']);
         $message = 'Разписанието е презаредено без преместване на запазените занятия.'
@@ -218,11 +267,7 @@ class ScheduleController extends Controller
             $message .= ' '.implode(' ', $result['messages']);
         }
 
-        return redirect()->route('schedules.index', [
-            'group_id' => $group->id,
-            'academic_year' => $data['academic_year'],
-            'semester_type' => $data['semester_type'],
-        ])->with([
+        return redirect()->route('schedules.index', $this->scheduleIndexParameters($request))->with([
             'status' => $message,
             'schedule_refresh_warnings' => array_values(array_unique($result['warnings'])),
         ]);
@@ -234,15 +279,12 @@ class ScheduleController extends Controller
             'group_id' => ['required', 'integer', 'exists:student_groups,id'],
             'academic_year' => ['required', 'string', 'max:20'],
             'semester_type' => ['required', 'in:winter,summer'],
+            'course_year' => ['nullable', 'integer', 'between:1,4'],
         ]);
         $group = StudentGroup::query()->findOrFail($data['group_id']);
         $warnings = $scheduleService->testSchedule($group, $data['academic_year'], $data['semester_type']);
 
-        return redirect()->route('schedules.index', [
-            'group_id' => $group->id,
-            'academic_year' => $data['academic_year'],
-            'semester_type' => $data['semester_type'],
-        ])->with([
+        return redirect()->route('schedules.index', $this->scheduleIndexParameters($request))->with([
             'schedule_tested' => true,
             'schedule_test_warnings' => $warnings,
             'status' => $warnings === []
@@ -288,6 +330,7 @@ class ScheduleController extends Controller
 
     public function update(Request $request, TimetableEntry $entry, ScheduleService $scheduleService): RedirectResponse|JsonResponse
     {
+        $this->assertEditableAcademicYear($entry->academic_year, $entry->semester_type);
         $data = $request->validate([
             'cycle_week' => ['required', 'integer', 'between:1,3'],
             'weekday_no' => ['required', 'integer', 'between:1,7'],
@@ -295,7 +338,6 @@ class ScheduleController extends Controller
             'start_time' => ['required', 'date_format:H:i'],
             'end_time' => ['required', 'date_format:H:i', 'after:start_time'],
             'duration_hours' => ['nullable', 'integer', 'between:1,16'],
-            'self_study_hours' => ['sometimes', 'numeric', 'between:0,16'],
             'teacher_id' => ['nullable', 'integer', 'exists:teachers,id'],
             'room_id' => ['nullable', 'integer', 'exists:rooms,id'],
             'coverage_type' => ['nullable', 'in:lecture,exercise'],
@@ -341,28 +383,25 @@ class ScheduleController extends Controller
             return response()->json(['message' => $status]);
         }
 
-        return redirect()->route('schedules.index', $request->only([
-            'group_id',
-            'academic_year',
-            'semester_type',
-            'cycle_week',
-        ]))->with('status', $status);
+        return redirect()->route('schedules.index', [
+            ...$this->scheduleIndexParameters($request),
+            'cycle_week' => $request->input('cycle_week'),
+        ])->with('status', $status);
     }
 
     public function park(Request $request, TimetableEntry $entry, ScheduleService $scheduleService): RedirectResponse|JsonResponse
     {
+        $this->assertEditableAcademicYear($entry->academic_year, $entry->semester_type);
         $scheduleService->parkEntry($entry);
 
         if ($request->expectsJson()) {
             return response()->json(['message' => 'Занятието е преместено във временния пул.']);
         }
 
-        return redirect()->route('schedules.index', $request->only([
-            'group_id',
-            'academic_year',
-            'semester_type',
-            'cycle_week',
-        ]))->with('status', 'Занятието е преместено във временния пул за ръчно преразпределяне.');
+        return redirect()->route('schedules.index', [
+            ...$this->scheduleIndexParameters($request),
+            'cycle_week' => $request->input('cycle_week'),
+        ])->with('status', 'Занятието е преместено във временния пул за ръчно преразпределяне.');
     }
 
     public function storeManualEntry(Request $request, ScheduleService $scheduleService): RedirectResponse
@@ -371,6 +410,7 @@ class ScheduleController extends Controller
             'group_id' => ['required', 'integer', 'exists:student_groups,id'],
             'academic_year' => ['required', 'string', 'max:20'],
             'semester_type' => ['required', 'in:winter,summer'],
+            'course_year' => ['nullable', 'integer', 'between:1,4'],
             'cycle_week' => ['required', 'integer', 'between:1,3'],
             'weekday_no' => ['required', 'integer', 'between:1,7'],
             'start_time' => ['required', 'date_format:H:i'],
@@ -384,6 +424,7 @@ class ScheduleController extends Controller
             'student_flow_id' => ['nullable', 'integer', 'exists:student_flows,id'],
             'note' => ['nullable', 'string', 'max:2000'],
         ]);
+        $this->assertEditableAcademicYear($data['academic_year'], $data['semester_type']);
         $data['group_id'] = (int) $data['group_id'];
         $data['subject_id'] = isset($data['subject_id']) ? (int) $data['subject_id'] : null;
         $data['teacher_id'] = isset($data['teacher_id']) ? (int) $data['teacher_id'] : null;
@@ -407,6 +448,7 @@ class ScheduleController extends Controller
         $entry = $scheduleService->addManualEntry($data);
 
         return redirect()->route('schedules.index', [
+            ...$this->scheduleIndexParameters($request),
             'group_id' => $entry->group_id,
             'academic_year' => $entry->academic_year,
             'semester_type' => $entry->semester_type,
@@ -420,8 +462,10 @@ class ScheduleController extends Controller
             'group_id' => ['required', 'integer', 'exists:student_groups,id'],
             'academic_year' => ['required', 'string', 'max:20'],
             'semester_type' => ['required', 'in:winter,summer'],
+            'course_year' => ['nullable', 'integer', 'between:1,4'],
             'note' => ['nullable', 'string', 'max:5000'],
         ]);
+        $this->assertEditableAcademicYear($data['academic_year'], $data['semester_type']);
         ScheduleNote::query()->updateOrCreate(
             [
                 'group_id' => $data['group_id'],
@@ -431,24 +475,21 @@ class ScheduleController extends Controller
             ['note' => $data['note'] ?? null],
         );
 
-        return redirect()->route('schedules.index', $request->only([
-            'group_id',
-            'academic_year',
-            'semester_type',
-            'cycle_week',
-        ]))->with('status', 'Бележката към графика е запазена.');
+        return redirect()->route('schedules.index', [
+            ...$this->scheduleIndexParameters($request),
+            'cycle_week' => $request->input('cycle_week'),
+        ])->with('status', 'Бележката към графика е запазена.');
     }
 
     public function destroy(Request $request, TimetableEntry $entry, ScheduleService $scheduleService): RedirectResponse
     {
+        $this->assertEditableAcademicYear($entry->academic_year, $entry->semester_type);
         $scheduleService->parkEntry($entry, 'Ръчно премахване');
 
-        return redirect()->route('schedules.index', $request->only([
-            'group_id',
-            'academic_year',
-            'semester_type',
-            'cycle_week',
-        ]))->with('status', 'Занятието е преместено във временния пул и може да бъде върнато в разписанието.');
+        return redirect()->route('schedules.index', [
+            ...$this->scheduleIndexParameters($request),
+            'cycle_week' => $request->input('cycle_week'),
+        ])->with('status', 'Занятието е преместено във временния пул и може да бъде върнато в разписанието.');
     }
 
     public function exportPdf(Request $request, StudentGroup $group): Response
@@ -581,9 +622,67 @@ class ScheduleController extends Controller
 
     private function defaultAcademicYear(): string
     {
-        $year = now()->year;
+        $year = now()->month >= 9 ? now()->year : now()->year - 1;
 
         return $year.'/'.($year + 1);
+    }
+
+    private function nextAcademicYear(): string
+    {
+        $year = (int) explode('/', $this->defaultAcademicYear())[0] + 1;
+
+        return $year.'/'.($year + 1);
+    }
+
+    private function isHistoricalAcademicYear(string $academicYear, ?string $semesterType = null): bool
+    {
+        if ($semesterType !== null) {
+            $termStatus = AcademicTerm::query()
+                ->where('academic_year', $academicYear)
+                ->where('semester_type', $semesterType)
+                ->value('status');
+            if ($termStatus !== null) {
+                return $termStatus === AcademicTerm::ARCHIVED;
+            }
+        }
+
+        return (int) explode('/', $academicYear)[0] < (int) explode('/', $this->defaultAcademicYear())[0];
+    }
+
+    private function assertEditableAcademicYear(string $academicYear, ?string $semesterType = null): void
+    {
+        if ($this->isHistoricalAcademicYear($academicYear, $semesterType)) {
+            throw ValidationException::withMessages([
+                'academic_year' => 'Архивираните семестри са достъпни само за справка.',
+            ]);
+        }
+    }
+
+    /**
+     * @return array{group_id?:mixed, academic_year?:mixed, semester_type?:mixed, course_year?:mixed}
+     */
+    private function scheduleIndexParameters(Request $request): array
+    {
+        $parameters = [];
+        $groupId = filter_var($request->input('group_id'), FILTER_VALIDATE_INT);
+        $courseYear = filter_var($request->input('course_year'), FILTER_VALIDATE_INT);
+        $academicYear = $request->input('academic_year');
+        $semesterType = $request->input('semester_type');
+
+        if ($groupId !== false && $groupId > 0) {
+            $parameters['group_id'] = $groupId;
+        }
+        if (is_string($academicYear) && strlen($academicYear) <= 20) {
+            $parameters['academic_year'] = $academicYear;
+        }
+        if (in_array($semesterType, ['winter', 'summer'], true)) {
+            $parameters['semester_type'] = $semesterType;
+        }
+        if ($courseYear !== false && $courseYear >= 1 && $courseYear <= 4) {
+            $parameters['course_year'] = $courseYear;
+        }
+
+        return $parameters;
     }
 
     /**

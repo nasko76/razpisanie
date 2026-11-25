@@ -27,7 +27,6 @@ class TimetableEntry extends Model
         'is_in_pool',
         'pool_reason',
         'auditorium_hours',
-        'self_study_hours',
         'locked',
     ];
 
@@ -37,7 +36,6 @@ class TimetableEntry extends Model
             'is_in_pool' => 'boolean',
             'locked' => 'boolean',
             'auditorium_hours' => 'decimal:2',
-            'self_study_hours' => 'decimal:2',
         ];
     }
 

@@ -3,6 +3,7 @@
 namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class Teacher extends Model
@@ -52,6 +53,24 @@ class Teacher extends Model
     public function assignments(): HasMany
     {
         return $this->hasMany(TeacherAssignment::class);
+    }
+
+    public function departmentRecord(): BelongsTo
+    {
+        return $this->belongsTo(Department::class, 'department_id');
+    }
+
+    public function assignDepartment(?string $departmentName): void
+    {
+        $departmentName = preg_replace('/\s+/u', ' ', trim((string) $departmentName)) ?? trim((string) $departmentName);
+        $department = $departmentName === ''
+            ? null
+            : Department::query()->firstOrCreate(['name' => $departmentName]);
+
+        $this->forceFill([
+            'department' => $department?->name,
+            'department_id' => $department?->id,
+        ])->save();
     }
 
     public function dayPreferences(): HasMany

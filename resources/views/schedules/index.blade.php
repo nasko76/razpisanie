@@ -157,36 +157,34 @@
             <aside class="panel filters">
                 <h2 class="panel-title">Параметри на разписанието</h2>
                 <form method="GET" action="{{ route('schedules.index') }}">
-                    <label for="group_id">Група</label>
-                    <select id="group_id" name="group_id" required>
-                        @foreach($groups as $group)
-                            <option value="{{ $group->id }}" @selected($selectedGroup?->id === $group->id)>
-                                {{ $group->specialty->name }} · {{ $group->display_name }}
-                            </option>
+                    <input type="hidden" name="academic_year" value="{{ $academicYear }}">
+                    <input type="hidden" name="semester_type" value="{{ $semesterType }}">
+                    <div class="meta" style="margin-top:0;padding-top:0;border-top:0">
+                        Учебен семестър
+                        <strong>{{ $semesterType === 'winter' ? 'Зима ' : 'Лято ' }}{{ $academicYear }} · {{ match($selectedTermStatus) { 'current' => 'текущ', 'planning' => 'планиране', 'archived' => 'архив', default => 'преглед' } }}</strong>
+                    </div>
+
+                    <label for="course_year">Курс</label>
+                    <select id="course_year" name="course_year" onchange="this.form.submit()">
+                        @foreach($courseYearOptions as $courseYearOption)
+                            <option value="{{ $courseYearOption }}" @selected($courseYear === $courseYearOption)>{{ $courseYearOption }}{{ $courseYearOption === 1 ? '-ви' : ($courseYearOption === 2 ? '-ри' : '-ти') }} курс</option>
                         @endforeach
                     </select>
 
-                    @role('admin')
-                        <label for="current_semester">Текущ семестър</label>
-                        <select id="current_semester" name="current_semester" onchange="this.form.submit()">
-                            <option value="">Всички</option>
-                            @foreach([1, 2, 3, 4] as $semester)
-                                <option value="{{ $semester }}" @selected($currentSemester === $semester)>Текущ семестър {{ $semester }}</option>
+                    <label for="group_id">Специалност и група</label>
+                    <select id="group_id" name="group_id" onchange="this.form.submit()" required>
+                        @foreach($groups->groupBy(fn ($group): string => $group->specialty_id.'|'.($group->curriculum_version_id ?? 'none')) as $specialtyGroups)
+                            @foreach($specialtyGroups as $group)
+                                <option value="{{ $group->id }}" @selected($selectedGroup?->id === $group->id)>
+                                    {{ $group->specialty->name }}{{ $specialtyGroups->count() > 1 && $group->group_name !== null ? ' - група '.$group->group_name : '' }}
+                                </option>
                             @endforeach
-                        </select>
-                    @endrole
-
-                    <label for="academic_year">Учебна година</label>
-                    <input id="academic_year" name="academic_year" value="{{ $academicYear }}" placeholder="2026/2027" required>
-
-                    <label for="semester_type">Семестър</label>
-                    <select id="semester_type" name="semester_type">
-                        <option value="winter" @selected($semesterType === 'winter')>Зимен</option>
-                        <option value="summer" @selected($semesterType === 'summer')>Летен</option>
+                        @endforeach
                     </select>
-
-                    <button class="button primary" type="submit">Покажи разписание</button>
                 </form>
+                @if($isHistoricalAcademicYear)
+                    <div class="meta"><strong>Архивен преглед</strong>Архивираните семестри са само за справка.</div>
+                @endif
                 @if($selectedGroup)
                     <div class="meta">
                         Учебен план
@@ -204,9 +202,9 @@
                                     $plannedSemesterHours = max(
                                         $hourValues['auditorium_hours'],
                                         $hourValues['lecture_hours'] + $hourValues['exercise_hours'],
-                                    ) + $hourValues['self_study_hours'];
+                                    );
                                 @endphp
-                                <li>{{ $curriculumSubject->subject->name }} · АЗ {{ $hourValues['auditorium_hours'] }} · Л {{ $hourValues['lecture_hours'] }} · У {{ $hourValues['exercise_hours'] }} · самоподготовка {{ $hourValues['self_study_hours'] }} · общо {{ $plannedSemesterHours }} ч. · в графика {{ $scheduledSemesterHours }} ч.</li>
+                                <li>{{ $curriculumSubject->subject->name }} · АЗ {{ $hourValues['auditorium_hours'] }} · Л {{ $hourValues['lecture_hours'] }} · У {{ $hourValues['exercise_hours'] }} · самоподготовка {{ $hourValues['self_study_hours'] }} ч. (по план) · за разпределяне {{ $plannedSemesterHours }} ч. · в графика {{ $scheduledSemesterHours }} ч.</li>
                             @empty
                                 <li>Няма дисциплини за избрания курс и семестър.</li>
                             @endforelse
@@ -221,12 +219,17 @@
                         <h2 class="panel-title" style="margin:0 0 3px">
                             {{ $selectedGroup ? $selectedGroup->specialty->name.' · '.$selectedGroup->display_name : 'Изберете курс' }}
                         </h2>
-                        <div class="week-caption">{{ $academicYear }} · {{ $semesterType === 'winter' ? 'Зимен семестър' : 'Летен семестър' }} · Седмици 1, 2 и 3</div>
+                        <div class="week-caption">{{ $academicYear }} · {{ $semesterNo }}. семестър · {{ $semesterType === 'winter' ? 'зимен' : 'летен' }} · Седмици 1, 2 и 3</div>
                     </div>
                 </div>
 
                 @if($selectedGroup)
-                    <div class="mobile-note">Трите седмици са показани едновременно. Плъзнете занятие в друг ден, част от деня или седмица. Натиснете „Редакция“ за преподавател, зала или заключване.</div>
+                    @if($isHistoricalAcademicYear)
+                        <div class="notice" style="margin:14px 20px 0">Архивно разписание — прегледът и износът са достъпни, редактирането е изключено.</div>
+                    @endif
+                    @unless($isHistoricalAcademicYear)
+                        <div class="mobile-note">Трите седмици са показани едновременно. Плъзнете занятие в друг ден, част от деня или седмица. Натиснете „Редакция“ за преподавател, зала или заключване.</div>
+                    @endunless
                     @foreach([1, 2, 3] as $week)
                     <section class="week-schedule" aria-label="Разписание за седмица {{ $week }}">
                     <h3 class="week-title">Седмица {{ $week }}</h3>
@@ -266,11 +269,12 @@
                                                         }
                                                     @endphp
                                                     <article                                                     class="lesson @if($entry->student_flow_id) flow-entry @endif"
-                                                             draggable="{{ $entry->locked ? 'false' : 'true' }}"
+                                                             draggable="{{ $isHistoricalAcademicYear || $entry->locked ? 'false' : 'true' }}"
                                                              data-entry-id="{{ $entry->id }}">
                                                         <span class="lesson-title">{{ $entry->subject?->name ?? $entry->custom_subject_name }}</span>
                                                         <span class="lesson-meta">{{ substr($entry->start_time, 0, 5) }}–{{ substr($entry->end_time, 0, 5) }} · {{ $entry->duration_hours }} уч. ч. · {{ $entry->room?->name ?? 'Без зала' }}<br>{{ $subjectTeacherNames === [] ? 'Преподавател не е зададен' : implode(', ', $subjectTeacherNames) }}@if($entry->studentFlow)<br>Общ поток: {{ $entry->studentFlow->name }}@endif</span>
                                                         @if($entry->note)<span class="lesson-meta">{{ $entry->note }}</span>@endif
+                                                        @unless($isHistoricalAcademicYear)
                                                         <div class="lesson-tools">
                                                             @if($entry->locked)<span class="locked">Заключено</span>@else<span class="week-caption">{{ $entry->duration_hours }} ч.</span>@endif
                                                             <details>
@@ -281,13 +285,13 @@
                                                                     <input type="hidden" name="group_id" value="{{ $selectedGroup->id }}">
                                                                     <input type="hidden" name="academic_year" value="{{ $academicYear }}">
                                                                     <input type="hidden" name="semester_type" value="{{ $semesterType }}">
+                                                                    <input type="hidden" name="course_year" value="{{ $courseYear }}">
                                                                     <input type="hidden" name="cycle_week" value="{{ $entry->cycle_week }}">
                                                                     <input type="hidden" name="weekday_no" value="{{ $entry->weekday_no }}">
                                                                     <input type="hidden" name="day_part" value="{{ $entry->displayDayPart() }}">
                                                                     <label>Начален час<input type="time" name="start_time" value="{{ substr($entry->start_time, 0, 5) }}" required></label>
                                                                     <label>Краен час<input type="time" name="end_time" value="{{ substr($entry->end_time, 0, 5) }}" required></label>
                                                                     <label>Учебни часове<input class="computed-duration" type="number" name="duration_hours" min="1" max="16" value="{{ $entry->duration_hours }}" readonly required></label>
-                                                                    <label>Самоподготовка за този блок<input type="number" name="self_study_hours" min="0" max="16" step="0.25" value="{{ $entry->self_study_hours }}" required></label>
                                                                     <label>Свободно име<input name="custom_subject_name" value="{{ $entry->custom_subject_name }}" maxlength="255"></label>
                                                                     <label>Бележка<textarea name="note" rows="2" maxlength="2000">{{ $entry->note }}</textarea></label>
                                                                     <label>Вид занятие
@@ -335,11 +339,13 @@
                                                                     <input type="hidden" name="group_id" value="{{ $selectedGroup->id }}">
                                                                     <input type="hidden" name="academic_year" value="{{ $academicYear }}">
                                                                     <input type="hidden" name="semester_type" value="{{ $semesterType }}">
+                                                                    <input type="hidden" name="course_year" value="{{ $courseYear }}">
                                                                     <input type="hidden" name="cycle_week" value="{{ $cycleWeek }}">
                                                                     <button class="button" type="submit" style="width:100%;margin-top:6px;color:#a33">Премести в пула</button>
                                                                 </form>
                                                             </details>
                                                         </div>
+                                                        @endunless
                                                     </article>
                                                 @empty
                                                     <div class="empty-cell">Свободен блок</div>
@@ -355,12 +361,14 @@
                     @endforeach
 
                     <div class="actions" style="padding:0 20px 20px">
+                        @unless($isHistoricalAcademicYear)
                         @if($selectedGroup->curriculum_version_id)
                         <form method="POST" action="{{ route('schedules.refresh') }}">
                             @csrf
                             <input type="hidden" name="group_id" value="{{ $selectedGroup->id }}">
                             <input type="hidden" name="academic_year" value="{{ $academicYear }}">
                             <input type="hidden" name="semester_type" value="{{ $semesterType }}">
+                            <input type="hidden" name="course_year" value="{{ $courseYear }}">
                             <button class="button" type="submit">Презареди данните без преместване</button>
                         </form>
                         <form method="POST" action="{{ route('schedules.generate') }}" onsubmit="return confirm('Генерирането ще изгради наново непоставените занятия за този семестър. Продължаване?')">
@@ -368,40 +376,44 @@
                             <input type="hidden" name="group_id" value="{{ $selectedGroup->id }}">
                             <input type="hidden" name="academic_year" value="{{ $academicYear }}">
                             <input type="hidden" name="semester_type" value="{{ $semesterType }}">
+                            <input type="hidden" name="course_year" value="{{ $courseYear }}">
                             <button class="button primary" type="submit">Генерирай ново разписание</button>
                         </form>
                         @endif
-                        @if($semesterType === 'winter')
-                        <form method="POST" action="{{ route('schedules.copy-previous-winter') }}">
+                        @if($selectedGroup->curriculum_version_id)
+                        <form method="POST" action="{{ route('schedules.copy-previous-term') }}">
                             @csrf
                             <input type="hidden" name="group_id" value="{{ $selectedGroup->id }}">
                             <input type="hidden" name="academic_year" value="{{ $academicYear }}">
-                            <button class="button" type="submit" onclick="return confirm('Копирането добавя занятия от предишната зима само при непроменени учебен план и възлагания. Продължаване?')">Копирай предишното зимно разписание</button>
+                            <input type="hidden" name="semester_type" value="{{ $semesterType }}">
+                            <input type="hidden" name="course_year" value="{{ $courseYear }}">
+                            <button class="button" type="submit" onclick="return confirm('Ще се запазят местата на съвпадащите занятия, ще се приложат текущите преподавателски възлагания, а новите занятия ще бъдат добавени в пула. Продължаване?')">Копирай предишното разписание</button>
                         </form>
                         @endif
+                        @endunless
                         <form method="POST" action="{{ route('schedules.test') }}">
                             @csrf
                             <input type="hidden" name="group_id" value="{{ $selectedGroup->id }}">
                             <input type="hidden" name="academic_year" value="{{ $academicYear }}">
                             <input type="hidden" name="semester_type" value="{{ $semesterType }}">
+                            <input type="hidden" name="course_year" value="{{ $courseYear }}">
                             <button class="button" type="submit">Тествай разписанието</button>
                         </form>
                         <span class="week-caption">Забележките и препоръките се показват след теста. Заключените занятия се запазват при генериране.</span>
-                        @if($semesterType === 'winter')
-                            <span class="week-caption">Копирането се разрешава само при непроменени учебен план и преподавателски възлагания.</span>
-                        @endif
                     </div>
                     @unless($selectedGroup->curriculum_version_id)
                         <p class="week-caption" style="padding:0 20px 20px">Групата няма учебен план. Добавяйте занятията ръчно.</p>
                     @endunless
 
                     <div style="padding:0 20px 20px">
+                        @unless($isHistoricalAcademicYear)
                         <form method="POST" action="{{ route('schedules.note.update') }}" class="edit-form">
                             @csrf
                             @method('PUT')
                             <input type="hidden" name="group_id" value="{{ $selectedGroup->id }}">
                             <input type="hidden" name="academic_year" value="{{ $academicYear }}">
                             <input type="hidden" name="semester_type" value="{{ $semesterType }}">
+                            <input type="hidden" name="course_year" value="{{ $courseYear }}">
                             <input type="hidden" name="cycle_week" value="{{ $cycleWeek }}">
                             <label>Бележка към целия график<textarea name="note" rows="2" maxlength="5000">{{ $note }}</textarea></label>
                             <button class="button" type="submit">Запази бележката</button>
@@ -414,6 +426,7 @@
                                 <input type="hidden" name="group_id" value="{{ $selectedGroup->id }}">
                                 <input type="hidden" name="academic_year" value="{{ $academicYear }}">
                                 <input type="hidden" name="semester_type" value="{{ $semesterType }}">
+                                <input type="hidden" name="course_year" value="{{ $courseYear }}">
                                 <label>Седмица<select name="cycle_week">@foreach([1, 2, 3] as $week)<option value="{{ $week }}" @selected($cycleWeek === $week)>Седмица {{ $week }}</option>@endforeach</select></label>
                                 <label>Дисциплина от плана (по избор)<select name="subject_id" class="manual-subject-select"><option value="">Без каталожна дисциплина</option>@foreach($curriculumSubjects as $curriculumSubject)<option value="{{ $curriculumSubject->subject_id }}">{{ $curriculumSubject->subject?->code }} · {{ $curriculumSubject->subject?->name }}</option>@endforeach</select></label>
                                 <label>Наименование<input name="custom_subject_name" maxlength="255"></label>
@@ -429,6 +442,7 @@
                                 <button class="button primary" type="submit">Добави в графика</button>
                             </form>
                         </details>
+                        @endunless
                     </div>
                 @else
                     <div class="empty-state">
@@ -453,32 +467,26 @@
                             $entry = $poolGroup->entry;
                             $formatPoolHours = fn (float $hours): string => rtrim(rtrim(number_format($hours, 2, '.', ''), '0'), '.');
                         @endphp
-                        <article class="lesson pool-entry @if($entry->student_flow_id) flow-entry @endif" draggable="true" data-entry-id="{{ $entry->id }}">
+                        <article class="lesson pool-entry @if($entry->student_flow_id) flow-entry @endif"
+                                 draggable="{{ $isHistoricalAcademicYear ? 'false' : 'true' }}"
+                                 data-entry-id="{{ $entry->id }}"
+                                 data-update-url="{{ route('schedules.update', $entry) }}"
+                                 data-start-time="{{ substr($entry->start_time, 0, 5) }}"
+                                 data-end-time="{{ substr($entry->end_time, 0, 5) }}"
+                                 data-duration-hours="{{ $entry->duration_hours }}"
+                                 data-coverage-type="{{ $entry->coverage_type ?? '' }}"
+                                 data-student-flow-id="{{ $entry->student_flow_id ?? '' }}"
+                                 data-teacher-id="{{ $entry->teacher_id ?? '' }}"
+                                 data-room-id="{{ $entry->room_id ?? '' }}"
+                                 data-locked="{{ $entry->locked ? '1' : '0' }}">
                             <span class="lesson-title">{{ $entry->subject?->name ?? $entry->custom_subject_name }}</span>
                             @if($entry->studentFlow)<span class="lesson-meta">Общ поток · {{ $entry->studentFlow->name }}</span>@endif
                             @if($poolGroup->coverage_types->isNotEmpty())
                                 <span class="lesson-meta">{{ $poolGroup->coverage_types->join(' и ') }}@if($poolGroup->teachers->isNotEmpty()) · {{ $poolGroup->teachers->join(', ') }}@endif</span>
                             @endif
                             <span class="lesson-meta remaining-hours">Остават {{ $poolGroup->remaining_hours }} уч. ч. за разпределяне</span>
-                            <span class="lesson-meta">АЗ {{ $formatPoolHours($poolGroup->auditorium_hours) }} ч. · Самоподготовка {{ $formatPoolHours($poolGroup->self_study_hours) }} ч.<br>
+                            <span class="lesson-meta">АЗ {{ $formatPoolHours($poolGroup->auditorium_hours) }} ч.<br>
                                 {{ $poolGroup->block_count }} блока{{ $poolGroup->all_standard_blocks ? ' по 4 ч.' : '' }} · {{ $poolGroup->has_manual_blocks ? 'включва ръчно върнати занятия' : 'подготвено по учебния план' }}</span>
-                            <form class="edit-form" method="POST" action="{{ route('schedules.update', $entry) }}">
-                                @csrf @method('PATCH')
-                                <input type="hidden" name="cycle_week" value="{{ $entry->cycle_week }}">
-                                <input type="hidden" name="weekday_no" value="{{ $entry->weekday_no }}">
-                                <input type="hidden" name="day_part" value="{{ $entry->displayDayPart() }}">
-                                <input type="hidden" name="start_time" value="{{ substr($entry->start_time, 0, 5) }}">
-                                <input type="hidden" name="end_time" value="{{ substr($entry->end_time, 0, 5) }}">
-                                <input type="hidden" name="duration_hours" value="{{ $entry->duration_hours }}">
-                                <input type="hidden" name="coverage_type" value="{{ $entry->coverage_type }}">
-                                <input type="hidden" name="student_flow_id" value="{{ $entry->student_flow_id }}">
-                                <input type="hidden" name="teacher_id" value="{{ $entry->teacher_id }}">
-                                <input type="hidden" name="room_id" value="{{ $entry->room_id }}">
-                                <input type="hidden" name="locked" value="{{ $entry->locked ? '1' : '0' }}">
-                                <input type="hidden" name="is_in_pool" value="1">
-                                <label>Самоподготовка за този блок<input type="number" name="self_study_hours" min="0" max="16" step="0.25" value="{{ $entry->self_study_hours }}" required></label>
-                                <button class="button" type="submit">Запази самоподготовката</button>
-                            </form>
                         </article>
                     @empty
                         <div class="empty-cell">Няма занятия в пула</div>
@@ -528,12 +536,16 @@
                 if (!draggedEntry) return;
 
                 const form = draggedEntry.querySelector('.edit-form');
+                const field = (name) => {
+                    const dataKey = name.replace(/_([a-z])/g, (_, letter) => letter.toUpperCase());
+                    return form?.elements[name]?.value ?? draggedEntry.dataset[dataKey] ?? '';
+                };
                 const targetStartMinutes = { morning: 8 * 60, afternoon: 13 * 60, evening: 17 * 60 }[zone.dataset.dropPart];
-                const [currentStartHour, currentStartMinute] = form.elements.start_time.value.split(':').map(Number);
-                const [currentEndHour, currentEndMinute] = form.elements.end_time.value.split(':').map(Number);
+                const [currentStartHour, currentStartMinute] = field('start_time').split(':').map(Number);
+                const [currentEndHour, currentEndMinute] = field('end_time').split(':').map(Number);
                 const elapsedMinutes = (currentEndHour * 60 + currentEndMinute) - (currentStartHour * 60 + currentStartMinute);
                 const targetEndMinutes = targetStartMinutes + elapsedMinutes;
-                if (targetEndMinutes >= 24 * 60) {
+                if (!Number.isFinite(targetStartMinutes) || !Number.isFinite(elapsedMinutes) || elapsedMinutes <= 0 || targetEndMinutes >= 24 * 60) {
                     message.textContent = 'Избраният часови диапазон не се побира в деня.';
                     return;
                 }
@@ -544,15 +556,15 @@
                     day_part: zone.dataset.dropPart,
                     start_time: formatTime(targetStartMinutes),
                     end_time: formatTime(targetEndMinutes),
-                    duration_hours: form.elements.duration_hours.value,
-                    coverage_type: form.elements.coverage_type.value,
-                    student_flow_id: form.elements.student_flow_id.value,
-                    teacher_id: form.elements.teacher_id.value,
-                    room_id: form.elements.room_id.value,
-                    locked: form.elements.locked.checked ? '1' : '0',
+                    duration_hours: field('duration_hours'),
+                    coverage_type: field('coverage_type'),
+                    student_flow_id: field('student_flow_id'),
+                    teacher_id: field('teacher_id'),
+                    room_id: field('room_id'),
+                    locked: form ? (form.elements.locked.checked ? '1' : '0') : field('locked'),
                     is_in_pool: '0',
                 });
-                const response = await fetch(form.action, {
+                const response = await fetch(form?.action ?? draggedEntry.dataset.updateUrl, {
                     method: 'PATCH',
                     headers: {
                         'Accept': 'application/json',
